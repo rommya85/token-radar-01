@@ -25,11 +25,11 @@ implied = clamp( round( tvl_usd
   × multiple(category)          median mcap/TVL of tokened protocols in the same
                                 category, computed from the snapshot at run time;
                                 falls back to the global median when a category has
-                                fewer than 3 tokened comparables
+                                fewer than 5 tokened comparables
   × momentum(change_7d)         1.0 when change_7d is not reported, else
-                                1 + 0.5 × clamp(change_7d, −60, +120) / 100,
+                                1 + 0.25 × clamp(change_7d, −60, +120) / 100,
                                 bounded to [0.8, 1.5]
-  × maturity(age)               0.7 + 0.3 × min(age, 1095) / 1095, where age is the
+  × maturity(age)               0.85 + 0.15 × min(age, 730) / 730, where age is the
                                 days since listed_at; a missing listed_at uses the
                                 snapshot median age
   × concentration               dampens a multiple above the global 75th percentile
