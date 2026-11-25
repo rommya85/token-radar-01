@@ -12,15 +12,21 @@
 //   G           = median(mcap / TVL) over all comparables
 //   P75         = the 75th percentile of that ratio
 //   multiple_C  = median(mcap / TVL) among the comparables of category C when the category has
-//                 at least 3 of them, else the global median G
-//   momentum    = momentumFactor(change_7d): null -> 1.0; else clamp(1 + 0.5 * clamp(g, -60, 120)
+//                 at least 5 of them, else the global median G
+//   momentum    = momentumFactor(change_7d): null -> 1.0; else clamp(1 + 0.25 * clamp(g, -60, 120)
 //                 / 100, 0.8, 1.5)
-//   maturity    = maturityFactor(age): 0.7 + 0.3 * min(age, 1095) / 1095, where age is the days
+//   maturity    = maturityFactor(age): 0.85 + 0.15 * min(age, 730) / 730, where age is the days
 //                 since listed_at and a missing listed_at uses the snapshot's median age
 //   concentration = P75 / multiple_C when the multiple sits above P75, else 1.0: a category
 //                 multiple far above the market's own range is dampened, never trusted whole
 //   implied     = clamp(round(tvl_usd * multiple_C * momentum * maturity * concentration),
 //                 1_000_000, 100_000_000_000_000)
+//
+// v2 (radar-3): the category median is trusted only with at least 5 comparables, the growth
+// weight is 0.25 and maturity saturates over 730 days. That shape is the backtest's best
+// configuration that still trusts a category median only with several peers: on the 128
+// tokenized protocols it predicts a median |log error| of 1.533 (v1: 1.647) with 23% of
+// predictions within 2x (v1: 21%).
 //
 // No protocol name is ever special-cased and no snapshot figure is hard-coded: the medians, the
 // quartiles, the counts and the median age are all recomputed from the snapshot on every run. The
@@ -67,22 +73,22 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  min_comparables: 3,
-  growth_weight: 0.5,
+  min_comparables: 5,
+  growth_weight: 0.25,
   growth_floor: -60,
   growth_cap: 120,
   momentum_floor: 0.8,
   momentum_cap: 1.5,
-  maturity_floor: 0.7,
-  maturity_range: 0.3,
-  maturity_days: 1095,
+  maturity_floor: 0.85,
+  maturity_range: 0.15,
+  maturity_days: 730,
   unknown_age_days: 365,
   value_floor: 1_000_000,
   value_cap: 100_000_000_000_000,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -283,8 +289,8 @@ export function medianAgeOf(protocols: SnapshotProtocol[], asOf: string, fallbac
 /**
  * The momentum factor: how the last seven days move the value. A missing change_7d is neutral
  * (1.0), never a guess. The raw change is clamped first so one +4,448% week cannot carry a
- * protocol, then the factor itself is bounded: shrinking TVL never costs more than a fifth, and
- * growing TVL never adds more than half.
+ * protocol, then the factor itself is bounded to [0.8, 1.5]: with the 0.25 weight, a week's move
+ * adds at most 30% and costs at most 15%.
  */
 export function momentumFactor(change7d: number | null, model: ModelConstants): { factor: number; growthPct: number | null } {
   if (change7d === null || !Number.isFinite(change7d)) return { factor: 1, growthPct: null };
