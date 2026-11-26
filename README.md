@@ -1,5 +1,9 @@
 # Token Radar — pre-token protocols ranked by implied value (radar-5)
 
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/rommya85/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/rommya85/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+
 A radar for token launches: it reads a sealed snapshot of 758 protocols, ranks the 198
 pre-token ones it can score by what their launch would be worth, and shows how to farm
 each one. 40/40 watchlist covered, plus 158 early candidates below the $50M floor.
@@ -70,3 +74,7 @@ detail, filtered, methodology).
 `implied_value_usd` desc (rank), then slug. Verdict lines: Farm now at implied
 >= $50M with non-negative 7-day growth and age >= 180 days; Watch at implied
 >= $10M; Skip below that.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=q2ms6026&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
