@@ -49,73 +49,39 @@
     return n.toFixed(4);
   }
 
-  // The model, as the page recomputes it. These four functions mirror lib/model.ts exactly:
-  // computeComparables, momentumFactor, maturityFactor and the concentration adjustment inside
-  // impliedOf. A row whose recomputed number differs from the board's is shown as stale.
-  function medianOf(sorted) {
-    if (sorted.length === 0) return null;
-    var mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  }
-  function quantileOf(sorted, q) {
-    if (sorted.length === 0) return null;
-    var pos = (sorted.length - 1) * q;
-    var lo = Math.floor(pos);
-    var hi = Math.ceil(pos);
-    if (lo === hi) return sorted[lo];
-    return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
-  }
-  function computeComparables(raw, model) {
-    var ratios = [];
-    var byCat = {};
+  // The model, as the page recomputes it. fitOls and impliedOf mirror lib/model.ts exactly:
+  // the same least squares over the same (log10 TVL, log10 mcap) pairs, in the same order, so
+  // a row whose recomputed number differs from the board's is shown as stale.
+  function fitOls(raw) {
+    var sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
     raw.forEach(function (entry) {
-      var cat = entry[0];
       var mcap = entry[1];
       var tvl = entry[2];
       if (!(mcap > 0) || !(tvl > 0)) return;
-      var r = mcap / tvl;
-      ratios.push(r);
-      if (!byCat[cat]) byCat[cat] = [];
-      byCat[cat].push(r);
+      var x = Math.log10(tvl);
+      var y = Math.log10(mcap);
+      sx += x; sy += y; sxx += x * x; sxy += x * y; n++;
     });
-    ratios.sort(function (a, b) { return a - b; });
-    var global = medianOf(ratios) || 0;
-    var p25 = quantileOf(ratios, 0.25) || global;
-    var p75 = quantileOf(ratios, 0.75) || global;
-    var table = Object.keys(byCat).map(function (cat) {
-      var rs = byCat[cat].sort(function (a, b) { return a - b; });
-      var med = medianOf(rs);
-      var ratio = (med === null || rs.length < model.min_comparables) ? global : med;
-      return { category: cat, n: rs.length, median: med, ratio: ratio };
-    });
-    table.sort(function (a, b) { return b.n - a.n || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0); });
-    return { n: ratios.length, global_median: global, p25: p25, p75: p75, by_category: table };
+    var b = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    var a = (sy - b * sx) / n;
+    return { a: a, b: b, n: n };
   }
-  var COMPS = computeComparables(DATA.comparables_raw, DATA.model);
+  var OLS = fitOls(DATA.comparables_raw);
 
-  function momentumFactor(change7d, model) {
-    if (change7d === null || change7d === undefined || !isFinite(change7d)) return { factor: 1, growthPct: null };
-    var growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, change7d));
-    var raw = 1 + (growthPct / 100) * model.growth_weight;
-    return { factor: Math.min(model.momentum_cap, Math.max(model.momentum_floor, raw)), growthPct: growthPct };
-  }
-  function maturityFactor(age, medianAge, model) {
-    var days = (age === null || age === undefined) ? medianAge : age;
-    var factor = model.maturity_floor + (Math.min(Math.max(days, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    return { factor: factor, ageDays: days };
-  }
-  function concentrationAdjustment(multiple, p75) {
-    return multiple > p75 ? p75 / multiple : 1;
-  }
   function impliedOf(row) {
     var m = DATA.model;
-    var entry = COMPS.by_category.filter(function (c) { return c.category === (row.category || 'Other'); })[0];
-    var ratio = entry ? entry.ratio : COMPS.global_median;
-    var mom = momentumFactor(row.change_7d, m);
-    var mat = maturityFactor(row.age_days, DATA.median_age_days, m);
-    var conc = concentrationAdjustment(ratio, COMPS.p75);
-    var raw = row.tvl_usd * ratio * mom.factor * mat.factor * conc;
-    return Math.min(m.value_cap, Math.max(m.value_floor, Math.round(raw)));
+    var raw = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)));
+    return Math.min(m.value_cap, Math.max(m.value_floor, raw));
+  }
+  function intervalOf(row) {
+    var implied = impliedOf(row);
+    var iv = DATA.interval;
+    return {
+      lo: Math.round(implied * iv.p25),
+      hi: Math.round(implied * iv.p75),
+      p10: Math.round(implied * iv.p10),
+      p90: Math.round(implied * iv.p90)
+    };
   }
 
   // The farm plan, as the page regenerates it. buildFarmPlan mirrors lib/model.ts step for
@@ -328,7 +294,7 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'verdict') { av = VERDICT_ORDER[a.verdict]; bv = VERDICT_ORDER[b.verdict]; }
-      else if (key === 'ratio') { av = a.ratio; bv = b.ratio; }
+      else if (key === 'odds') { av = a.token_odds === null ? -1 : a.token_odds; bv = b.token_odds === null ? -1 : b.token_odds; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -351,13 +317,16 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + '/40 watchlist covered · ' + DATA.early_size + ' early candidates found beyond it' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a comparables model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a size-curve fit, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Tokened comparables' }), el('b', { text: String(DATA.comparables.n) }))
+        el('div', { class: 'fact' }, el('span', { text: 'Tokened comparables' }), el('b', { text: String(DATA.ols.n) }))
+      ),
+      el('div', { class: 'ledger' },
+        el('span', { text: 'Integrity — all ' + DATA.ledger_total + ' protocols accounted for: ' + DATA.ledger.map(function (g) { return g.count + ' ' + g.label; }).join(' · ') })
       )
     );
   }
@@ -454,8 +423,10 @@
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
-          el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
+          el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) }),
+          el('span', { class: 'sub', text: 'P25–P75 ' + fmtUsd(r.interval_lo_usd) + '–' + fmtUsd(r.interval_hi_usd) })
         )),
+        el('td', { class: 'num', text: r.token_odds === null ? 'n/a' : Math.round(r.token_odds * 100) + '%' }),
         el('td', null, verdictChip(r.verdict)),
         el('td', null, el('span', { class: r.watchlist ? 'chip' : 'chip early', text: r.watchlist ? 'watchlist' : 'early' }))
       );
@@ -472,6 +443,7 @@
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
+            sortHeader('odds', 'Token odds'),
             sortHeader('verdict', 'Verdict'),
             el('th', { scope: 'col', text: 'List' })
           )),
@@ -505,38 +477,60 @@
   }
 
   function methodology() {
-    var m = DATA.model;
-    var cats = COMPS.by_category.filter(function (c) {
-      return DATA.rows.some(function (r) { return (r.category || 'Other') === c.category; });
-    });
-    var compRows = cats.map(function (c) {
+    var iv = DATA.interval;
+    var ledgerRows = DATA.ledger.map(function (g) {
       return el('tr', null,
-        el('td', { text: c.category }),
-        el('td', { class: 'num', text: String(c.n) }),
-        el('td', { class: 'num', text: fmtRatio(c.median) }),
-        el('td', { class: 'num', text: fmtRatio(c.ratio) })
+        el('td', { text: g.label }),
+        el('td', { class: 'num', text: String(g.count) })
+      );
+    });
+    var oddsRows = DATA.odds_bands.map(function (b) {
+      return el('tr', null,
+        el('td', { text: b.band }),
+        el('td', { class: 'num', text: String(b.total) }),
+        el('td', { class: 'num', text: String(b.tokened) }),
+        el('td', { class: 'num', text: Math.round(b.share * 100) + '%' })
       );
     });
     return el('section', { class: 'panel method', id: 'methodology' },
       el('h2', { text: 'Methodology' }),
       el('p', { class: 'sub', text: 'Every figure on this page is computed from the sealed snapshot; the program runs twice and writes byte-identical output. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = clamp( round( tvl_usd x multiple(category) x momentum(change_7d) x maturity(age) x concentration ), $1,000,000, $100,000,000,000,000 )'
+        'implied = clamp( round( 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ) ), $1,000,000, $100,000,000,000,000 )'
       ),
-      el('p', { class: 'sub', text: 'multiple(category) is the median mcap/TVL of the tokened protocols in the same category, computed from the snapshot at run time; a category with fewer than ' + m.min_comparables + ' tokened comparables falls back to the global median of ' + fmtRatio(COMPS.global_median) + ' (' + COMPS.n + ' comparables). momentum is 1.0 when change_7d is not reported, else 1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, bounded to [' + m.momentum_floor + ', ' + m.momentum_cap + ']. maturity is ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', where age is the days since listed_at and a missing listed_at uses the snapshot median age of ' + DATA.median_age_days + ' days. concentration dampens a multiple above the global 75th percentile (' + fmtRatio(COMPS.p75) + ') back toward it. The board is strictly pre-token: protocols that record no token. Tokened protocols appear only as comparables and in the Live token tab.' }),
-      el('h3', { text: 'Comparables used, by category' }),
+      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). Leave-one-out, each tokened protocol predicted by a curve fitted without it, the median error is ' + iv.loo_median_abs.toFixed(3) + ' in log space (about x' + Math.exp(iv.loo_median_abs).toFixed(2) + '), with ' + Math.round(iv.loo_within_2x * 100) + '% of predictions within 2x; the previous comparables model scored 1.533 with 23% within 2x on the same protocol. Growth and age were tested as multipliers on the same protocol and changed nothing, so they do not enter the value; they still decide the farm verdict and the token-odds column.' }),
+      el('p', { class: 'sub', text: 'The interval comes from those same leave-one-out residuals: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. Walk-forward, the curve trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the curve, so a narrow interval would be a lie.' }),
+      el('h3', { text: 'Ledger — all ' + DATA.ledger_total + ' protocols accounted for' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'compact' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comparables' }), el('th', { scope: 'col', text: 'Median mcap/TVL' }), el('th', { scope: 'col', text: 'Multiple used' }))),
-          el('tbody', null, compRows)
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Group' }), el('th', { scope: 'col', text: 'Protocols' }))),
+          el('tbody', null, ledgerRows)
         )
       ),
-      el('p', { class: 'sub', text: 'Coverage: ' + DATA.watchlist_size + '/' + DATA.watchlist_size + ' watchlist protocols covered, plus ' + DATA.early_size + ' early candidates below the $' + Math.round(DATA.floor_usd / 1e6) + 'M floor. A protocol is said to record no token, never to have none: its record may simply not carry one.' })
+      el('p', { class: 'sub', text: 'The watchlist is the snapshot’s own list, never recomputed: recomputing it from the fields drops the child products the snapshot’s rule already saw. Set aside, in order: bridge, liquid staking, exchange, versioned, wrapped.' }),
+      el('h3', { text: 'Token odds by age' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'compact' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Age with no token' }), el('th', { scope: 'col', text: 'Protocols' }), el('th', { scope: 'col', text: 'Record a token' }), el('th', { scope: 'col', text: 'Share' }))),
+          el('tbody', null, oddsRows)
+        )
+      ),
+      el('p', { class: 'sub', text: 'Token odds is the share of protocols in the same age band that record a token at all: a descriptive share, not a forecast. Coverage: ' + DATA.watchlist_size + '/' + DATA.watchlist_size + ' watchlist protocols covered, plus ' + DATA.early_size + ' early candidates below the $' + Math.round(DATA.floor_usd / 1e6) + 'M floor. A protocol is said to record no token, never to have none: its record may simply not carry one.' })
     );
   }
 
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
+
+  function oddsBandLabel(age) {
+    if (age === null || age === undefined) return 'no date';
+    if (age < 183) return '<6mo';
+    if (age < 365) return '6-12mo';
+    if (age < 548) return '1-1.5y';
+    if (age < 730) return '1.5-2y';
+    if (age < 1095) return '2-3y';
+    return '3y+';
+  }
 
   function openDetail(slug) {
     var row = DATA.rows.filter(function (r) { return r.slug === slug; })[0];
@@ -545,14 +539,6 @@
     writeHash();
     dialog.textContent = '';
     var steps = buildFarmPlan(row);
-    var m = DATA.model;
-    var entry = COMPS.by_category.filter(function (c) { return c.category === (row.category || 'Other'); })[0];
-    var ratio = entry ? entry.ratio : COMPS.global_median;
-    var ratioN = entry ? entry.n : 0;
-    var ratioMed = entry ? entry.median : null;
-    var mom = momentumFactor(row.change_7d, m);
-    var mat = maturityFactor(row.age_days, DATA.median_age_days, m);
-    var conc = concentrationAdjustment(ratio, COMPS.p75);
     var recomputed = impliedOf(row);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
@@ -567,13 +553,14 @@
       el('h3', { text: 'Implied value — the walk-through' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Category multiple (' + (row.category || 'Other') + ')' }), el('b', { class: 'num', text: fmtRatio(ratio) + ' from ' + ratioN + ' comparables' + (ratioMed === null ? '' : ', median ' + fmtRatio(ratioMed)) })),
-        el('div', null, el('span', { text: 'Momentum (' + (row.change_7d === null ? 'no 7-day change reported' : fmtPct(row.change_7d)) + ')' }), el('b', { class: 'num', text: fmtFactor(mom.factor) })),
-        el('div', null, el('span', { text: 'Maturity (' + fmtAge(row.age_days) + ' with no token)' }), el('b', { class: 'num', text: fmtFactor(mat.factor) })),
-        el('div', null, el('span', { text: 'Concentration adjustment' }), el('b', { class: 'num', text: fmtFactor(conc) })),
-        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
+        el('div', null, el('span', { text: 'log10(TVL)' }), el('b', { class: 'num', text: fmtFactor(Math.log10(row.tvl_usd)) })),
+        el('div', null, el('span', { text: 'Size curve: ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL), fitted on ' + DATA.ols.n + ' tokened protocols' }), el('b', { class: 'num', text: fmtFactor(DATA.ols.a + DATA.ols.b * Math.log10(row.tvl_usd)) })),
+        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'P25–P75 interval' }), el('b', { class: 'num', text: fmtUsd(row.interval_lo_usd) + ' – ' + fmtUsd(row.interval_hi_usd) })),
+        el('div', null, el('span', { text: 'P10–P90 interval' }), el('b', { class: 'num', text: fmtUsd(row.p10_usd) + ' – ' + fmtUsd(row.p90_usd) })),
+        el('div', null, el('span', { text: 'Token odds (' + oddsBandLabel(row.age_days) + ')' }), el('b', { class: 'num', text: row.token_odds === null ? 'n/a' : Math.round(row.token_odds * 100) + '%' }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price. The protocol records no token.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the leave-one-out range, not a confidence trick: the typical tokened protocol lands 3.4x from the curve. This is an estimate, not a price. The protocol records no token.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -605,7 +592,8 @@
     if (state.selected) openDetail(state.selected);
     if (state.methodology) {
       var target = document.getElementById('methodology');
-      if (target) target.scrollIntoView();
+      // Defer past the browser's own scroll handling on load, or it lands back at the top.
+      if (target) setTimeout(function () { target.scrollIntoView(); }, 0);
     }
   }
 

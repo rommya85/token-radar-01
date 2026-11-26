@@ -63,6 +63,7 @@ a { color: var(--accent); }
 .lede { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap: var(--s6); padding: var(--s6) 0 var(--s5); }
 .lede p { color: var(--muted); max-width: 62ch; margin-top: var(--s2); }
 .facts { display: grid; gap: var(--s2); align-content: start; border-left: 1px solid var(--border); padding-left: var(--s5); }
+.ledger { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: var(--s3); color: var(--muted); font-size: 13px; }
 .fact { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
 .fact b { font-family: var(--font-num); font-size: 15px; font-weight: 500; }
 .fact span { color: var(--muted); font-size: 13px; }
@@ -101,7 +102,8 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 .neg { color: var(--negative); }
 .bar { width: 110px; height: 6px; border-radius: 3px; background: #ece5d8; overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--accent); }
-.implied { display: flex; align-items: center; gap: var(--s2); }
+.implied { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.implied .sub { flex-basis: 100%; }
 .chip { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .chip.early::before { background: var(--positive); }
