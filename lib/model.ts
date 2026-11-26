@@ -4,33 +4,28 @@
 // other rankable pre-token protocol: the early rows the radar exists to find. A protocol is
 // pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol); the
 // snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed
-// into the ranked board. They are used only as comparables for the model.
+// into the ranked board. They are used only as the fit set for the model.
 //
-// Implied value is a comparables estimate, computed from the snapshot itself at run time:
+// Implied value is a size-curve estimate, fitted from the snapshot itself at run time:
 //
-//   comparables = tokenized protocols with a market cap and TVL
-//   G           = median(mcap / TVL) over all comparables
-//   P75         = the 75th percentile of that ratio
-//   multiple_C  = median(mcap / TVL) among the comparables of category C when the category has
-//                 at least 5 of them, else the global median G
-//   momentum    = momentumFactor(change_7d): null -> 1.0; else clamp(1 + 0.25 * clamp(g, -60, 120)
-//                 / 100, 0.8, 1.5)
-//   maturity    = maturityFactor(age): 0.85 + 0.15 * min(age, 730) / 730, where age is the days
-//                 since listed_at and a missing listed_at uses the snapshot's median age
-//   concentration = P75 / multiple_C when the multiple sits above P75, else 1.0: a category
-//                 multiple far above the market's own range is dampened, never trusted whole
-//   implied     = clamp(round(tvl_usd * multiple_C * momentum * maturity * concentration),
-//                 1_000_000, 100_000_000_000_000)
+//   fit set     = the 128 tokenized protocols with a market cap and a TVL
+//   OLS         = least squares on (log10 TVL, log10 mcap) over the fit set, giving
+//                 log10(mcap) = a + b * log10(TVL)
+//   implied     = clamp(round(10 ^ (a + b * log10(tvl_usd))), 1_000_000, 100_000_000_000_000)
 //
-// v2 (radar-3): the category median is trusted only with at least 5 comparables, the growth
-// weight is 0.25 and maturity saturates over 730 days. That shape is the backtest's best
-// configuration that still trusts a category median only with several peers: on the 128
-// tokenized protocols it predicts a median |log error| of 1.533 (v1: 1.647) with 23% of
-// predictions within 2x (v1: 21%).
+// v3 (radar-4): the category-median comparables of v1/v2 are gone. On the 128 tokenized
+// protocols, leave-one-out, the size curve predicts a median |log error| of 1.223 (v2: 1.533)
+// with 32% of predictions within 2x (v2: 23%). Momentum and maturity multipliers were tested
+// on the same protocol and changed nothing (median 1.223 either way, within-2x 32% either way),
+// so they do not enter the value; growth and age still decide the farm verdict and the
+// token-odds column. Every row also carries an interval from the leave-one-out residuals:
+// P25-P75 on the board, P10-P90 in the detail view. Walk-forward (train on tokens listed
+// before 2024-07-08, test on the 43 listed after) covered 53% of test tokens inside the
+// P25-P75 range (stated 50%) and 77% inside P10-P90 (stated 80%).
 //
-// No protocol name is ever special-cased and no snapshot figure is hard-coded: the medians, the
-// quartiles, the counts and the median age are all recomputed from the snapshot on every run. The
-// dashboard shows the comparables table the model used and walks one protocol's number
+// No protocol name is ever special-cased and no snapshot figure is hard-coded: the fit, the
+// interval, the walk-forward coverage, the ledger and the odds bands are all recomputed from
+// the snapshot on every run. The dashboard shows the fit and walks one protocol's number
 // end-to-end, so a reader can check every figure.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
@@ -58,56 +53,62 @@ export interface Snapshot {
 
 /** The model's structural constants: the shape of the formula, not the market's numbers. */
 export interface ModelConstants {
-  min_comparables: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  momentum_floor: number;
-  momentum_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
   value_floor: number;
   value_cap: number;
+  unknown_age_days: number;
+  /** The walk-forward cutoff: tokens listed before it train the curve, after it test it. */
+  walk_forward_cutoff: string;
 }
 
 export const MODEL: ModelConstants = {
-  min_comparables: 5,
-  growth_weight: 0.25,
-  growth_floor: -60,
-  growth_cap: 120,
-  momentum_floor: 0.8,
-  momentum_cap: 1.5,
-  maturity_floor: 0.85,
-  maturity_range: 0.15,
-  maturity_days: 730,
-  unknown_age_days: 365,
   value_floor: 1_000_000,
   value_cap: 100_000_000_000_000,
+  unknown_age_days: 365,
+  walk_forward_cutoff: '2024-07-08',
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
-/** One category's comparables: how many tokenized peers, their median ratio, the ratio used. */
-export interface CategoryComparable {
-  category: string;
+/** The fitted size curve: log10(mcap) = a + b * log10(TVL), over n tokenized protocols. */
+export interface OlsFit {
+  a: number;
+  b: number;
   n: number;
-  median: number | null;
-  ratio: number;
 }
 
-/** The comparables the run computed from the snapshot. */
-export interface Comparables {
-  n: number;
-  global_median: number;
+/** The per-row interval from the leave-one-out residuals, as multipliers of implied value. */
+export interface Interval {
+  p10: number;
   p25: number;
   p75: number;
-  by_category: CategoryComparable[];
+  p90: number;
+  loo_n: number;
+  loo_median_abs: number;
+  loo_within_2x: number;
+  loo_within_3x: number;
+  wf_n: number;
+  wf_p2575: number;
+  wf_p1090: number;
+  wf_median_abs: number;
+}
+
+/** One group of the 758-protocol ledger: every protocol sits in exactly one group. */
+export interface LedgerGroup {
+  key: string;
+  label: string;
+  count: number;
+}
+
+/** One age band's token share: the fraction of its protocols that record a token. */
+export interface OddsBand {
+  band: string;
+  total: number;
+  tokened: number;
+  share: number;
 }
 
 /** A farm step: the action, the principal it moves, what it costs, how long it takes, and its risk. */
@@ -135,16 +136,18 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  interval_lo_usd: number;
+  interval_hi_usd: number;
+  p10_usd: number;
+  p90_usd: number;
+  token_odds: number | null;
   verdict: 'Farm now' | 'Watch' | 'Skip';
   verdict_reason: string;
   model: {
-    ratio: number;
-    ratio_n: number;
-    ratio_median: number | null;
-    growth_pct: number | null;
-    momentum_factor: number;
-    maturity_factor: number;
-    concentration_adjustment: number;
+    ols_a: number;
+    ols_b: number;
+    log10_tvl: number;
+    log10_pred: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -163,11 +166,11 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  ratio: number;
-  ratio_n: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  concentration_adjustment: number;
+  interval_lo_usd: number;
+  interval_hi_usd: number;
+  p10_usd: number;
+  p90_usd: number;
+  token_odds: number | null;
   verdict: 'Farm now' | 'Watch' | 'Skip';
   verdict_reason: string;
   watchlist: boolean;
@@ -184,7 +187,7 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, the comparables and the model. */
+/** Everything the dashboard needs: the board, the live set, the fit and the model. */
 export interface RadarData {
   as_of: string;
   floor_usd: number;
@@ -195,7 +198,11 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   median_age_days: number;
-  comparables: Comparables;
+  ols: OlsFit;
+  interval: Interval;
+  ledger: LedgerGroup[];
+  ledger_total: number;
+  odds_bands: OddsBand[];
   comparables_raw: Array<[string, number, number]>;
   rows: RadarRow[];
   live: LiveRow[];
@@ -228,46 +235,42 @@ function quantileOf(sorted: number[], q: number): number | null {
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
 }
 
-/**
- * The comparables: every tokenized protocol with a market cap and a TVL gives one mcap/TVL ratio.
- * The global median and quartiles come from all of them. A category's multiple is its own median
- * ratio when it has at least min_comparables peers; with fewer, the category is not trusted and
- * the multiple falls back to the global median. A single peer's wild ratio can therefore never
- * carry a whole category.
- */
-export function computeComparables(protocols: SnapshotProtocol[], model: ModelConstants = MODEL): Comparables {
-  const ratios: number[] = [];
-  const byCat = new Map<string, number[]>();
+/** The fit set: every tokenized protocol with a market cap and a TVL, as (log10 TVL, log10 mcap) pairs in snapshot order. */
+export function tokenizedPairs(protocols: SnapshotProtocol[]): Array<[number, number]> {
+  const pairs: Array<[number, number]> = [];
   for (const p of protocols) {
     if (p.mcap_usd === null || p.tvl_usd <= 0 || p.mcap_usd <= 0) continue;
-    const r = p.mcap_usd / p.tvl_usd;
-    ratios.push(r);
-    const cat = p.category ?? 'Other';
-    const list = byCat.get(cat);
-    if (list === undefined) byCat.set(cat, [r]);
-    else list.push(r);
+    pairs.push([Math.log10(p.tvl_usd), Math.log10(p.mcap_usd)]);
   }
-  ratios.sort((a, b) => a - b);
-  const global = medianOf(ratios) ?? 0;
-  const p25 = quantileOf(ratios, 0.25) ?? global;
-  const p75 = quantileOf(ratios, 0.75) ?? global;
-  const byCategory: CategoryComparable[] = [];
-  for (const [category, rs] of byCat) {
-    rs.sort((a, b) => a - b);
-    const med = medianOf(rs);
-    const ratio = med === null || rs.length < model.min_comparables ? global : med;
-    byCategory.push({ category, n: rs.length, median: med, ratio });
-  }
-  byCategory.sort((a, b) => b.n - a.n || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
-  return { n: ratios.length, global_median: global, p25, p75, by_category: byCategory };
+  return pairs;
 }
 
-/** The shrunk ratio for one category: the table's value, or the global median when it has none. */
-export function ratioFor(category: string | null, comps: Comparables): { ratio: number; n: number; median: number | null } {
-  const cat = category ?? 'Other';
-  const found = comps.by_category.find((c) => c.category === cat);
-  if (found === undefined) return { ratio: comps.global_median, n: 0, median: null };
-  return { ratio: found.ratio, n: found.n, median: found.median };
+/**
+ * The size curve: least squares on the fit set's (log10 TVL, log10 mcap) pairs, giving
+ * log10(mcap) = a + b * log10(TVL). The dashboard recomputes this exact fit from the same
+ * pairs, in the same order, so its walk-through agrees with the board to the dollar.
+ */
+export function fitOls(pairs: Array<[number, number]>): OlsFit {
+  let sx = 0;
+  let sy = 0;
+  let sxx = 0;
+  let sxy = 0;
+  for (const [x, y] of pairs) {
+    sx += x;
+    sy += y;
+    sxx += x * x;
+    sxy += x * y;
+  }
+  const n = pairs.length;
+  const b = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  const a = (sy - b * sx) / n;
+  return { a, b, n };
+}
+
+/** One protocol's implied value under the fitted curve, clamped to the model's floor and cap. */
+export function olsPredict(tvl: number, fit: OlsFit, model: ModelConstants): number {
+  const raw = Math.round(10 ** (fit.a + fit.b * Math.log10(tvl)));
+  return Math.min(model.value_cap, Math.max(model.value_floor, raw));
 }
 
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
@@ -287,51 +290,183 @@ export function medianAgeOf(protocols: SnapshotProtocol[], asOf: string, fallbac
 }
 
 /**
- * The momentum factor: how the last seven days move the value. A missing change_7d is neutral
- * (1.0), never a guess. The raw change is clamped first so one +4,448% week cannot carry a
- * protocol, then the factor itself is bounded to [0.8, 1.5]: with the 0.25 weight, a week's move
- * adds at most 30% and costs at most 15%.
+ * The interval and its honesty check, from the fit set alone. Leave-one-out: each tokenized
+ * protocol is predicted by a curve fitted without it, and the residual is log(actual/pred), so
+ * exp(quantile) is the multiplier of the actual value over the predicted one. Walk-forward:
+ * the curve is fitted on tokens listed before the cutoff and tested on the tokens listed after
+ * it; the coverage is how many of those test residuals fall inside the leave-one-out bands.
+ * The multipliers are global: every board row's interval is its implied value times them.
  */
-export function momentumFactor(change7d: number | null, model: ModelConstants): { factor: number; growthPct: number | null } {
-  if (change7d === null || !Number.isFinite(change7d)) return { factor: 1, growthPct: null };
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, change7d));
-  const raw = 1 + (growthPct / 100) * model.growth_weight;
-  return { factor: Math.min(model.momentum_cap, Math.max(model.momentum_floor, raw)), growthPct };
+export function looInterval(protocols: SnapshotProtocol[], model: ModelConstants = MODEL): Interval {
+  const tokenized = protocols.filter((p) => p.mcap_usd !== null && p.tvl_usd > 0 && p.mcap_usd > 0);
+  const pairs = tokenizedPairs(tokenized);
+  const residuals: number[] = [];
+  for (let i = 0; i < tokenized.length; i++) {
+    const rest = pairs.slice(0, i).concat(pairs.slice(i + 1));
+    const fit = fitOls(rest);
+    const pred = olsPredict(tokenized[i]!.tvl_usd, fit, model);
+    residuals.push(Math.log(tokenized[i]!.mcap_usd! / pred));
+  }
+  const sorted = [...residuals].sort((a, b) => a - b);
+  const q10 = quantileOf(sorted, 0.1) ?? 0;
+  const q25 = quantileOf(sorted, 0.25) ?? 0;
+  const q75 = quantileOf(sorted, 0.75) ?? 0;
+  const q90 = quantileOf(sorted, 0.9) ?? 0;
+  const looMedianAbs = medianOf(residuals.map((r) => Math.abs(r)).sort((a, b) => a - b)) ?? 0;
+
+  const cutoff = model.walk_forward_cutoff;
+  const train = tokenized.filter((p) => p.listed_at !== null && p.listed_at < cutoff);
+  const test = tokenized.filter((p) => p.listed_at !== null && p.listed_at >= cutoff);
+  const trainFit = fitOls(tokenizedPairs(train));
+  const wfResiduals = test.map((p) => Math.log(p.mcap_usd! / olsPredict(p.tvl_usd, trainFit, model)));
+  const wfMedianAbs = wfResiduals.length === 0 ? 0 : (medianOf(wfResiduals.map((r) => Math.abs(r)).sort((a, b) => a - b)) ?? 0);
+  const wfP2575 = wfResiduals.length === 0 ? 0 : wfResiduals.filter((r) => r >= q25 && r <= q75).length / wfResiduals.length;
+  const wfP1090 = wfResiduals.length === 0 ? 0 : wfResiduals.filter((r) => r >= q10 && r <= q90).length / wfResiduals.length;
+  return {
+    p10: Math.exp(q10),
+    p25: Math.exp(q25),
+    p75: Math.exp(q75),
+    p90: Math.exp(q90),
+    loo_n: residuals.length,
+    loo_median_abs: looMedianAbs,
+    loo_within_2x: residuals.length === 0 ? 0 : residuals.filter((r) => Math.abs(r) < Math.log(2)).length / residuals.length,
+    loo_within_3x: residuals.length === 0 ? 0 : residuals.filter((r) => Math.abs(r) < Math.log(3)).length / residuals.length,
+    wf_n: wfResiduals.length,
+    wf_p2575: wfP2575,
+    wf_p1090: wfP1090,
+    wf_median_abs: wfMedianAbs,
+  };
+}
+
+/** Whether a protocol records a token at all: a market cap, a CoinGecko id or a symbol. */
+export function recordsToken(p: SnapshotProtocol): boolean {
+  return p.mcap_usd !== null || p.gecko_id !== null || p.symbol !== null;
 }
 
 /**
- * The maturity factor: how long the protocol has run with no token. A missing listed_at uses the
- * snapshot's median age, stated on the page. The factor rises with age and saturates at
- * maturity_days: a long-running protocol with no token ranks higher than a fresh one, but age
- * alone never doubles a value.
+ * The 758-protocol ledger, as one pass so the total is exact by construction. A protocol sits
+ * in exactly one group: it trades, or it records a token with no usable cap, or it is pre-token
+ * and ranked (watchlist, off-list above the floor, early below it), or it is pre-token and set
+ * aside, classified in the order bridge, liquid staking, exchange, versioned, wrapped. The
+ * watchlist is the snapshot's own list, never recomputed: recomputing it from the fields drops
+ * the child products the snapshot's rule already saw.
  */
-export function maturityFactor(age: number | null, medianAge: number, model: ModelConstants): { factor: number; ageDays: number } {
-  const days = age ?? medianAge;
-  const factor = model.maturity_floor + (Math.min(Math.max(days, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  return { factor, ageDays: days };
+export function computeLedger(snapshot: Snapshot): LedgerGroup[] {
+  const counts = new Map<string, number>();
+  const bump = (key: string): void => counts.set(key, (counts.get(key) ?? 0) + 1);
+  const watchlist = new Set(snapshot.watchlist);
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0) {
+      bump('trades');
+    } else if (recordsToken(p)) {
+      bump('recorded');
+    } else if (watchlist.has(p.slug)) {
+      bump('watchlist');
+    } else if (isRankable(p)) {
+      bump(p.tvl_usd >= snapshot.floor_usd ? 'off-list' : 'early');
+    } else if (p.category === 'Bridge' || p.category === 'Canonical Bridge') {
+      bump('bridge');
+    } else if (p.category === 'Liquid Staking' || p.category === 'Liquid Restaking' || p.category === 'Restaked BTC') {
+      bump('liquid-staking');
+    } else if (p.category === 'CEX' || EXCHANGES.some((e) => p.name.startsWith(e))) {
+      bump('exchange');
+    } else if (VERSIONED.test(p.name)) {
+      bump('versioned');
+    } else if (WRAPPED.test(p.name)) {
+      bump('wrapped');
+    } else {
+      bump('other');
+    }
+  }
+  const labels: Array<[string, string]> = [
+    ['trades', 'Token trades'],
+    ['recorded', 'Token recorded, no usable cap'],
+    ['watchlist', 'Ranked watchlist'],
+    ['off-list', 'Ranked off-list above floor'],
+    ['early', 'Ranked early below floor'],
+    ['bridge', 'Out bridge'],
+    ['liquid-staking', 'Out liquid staking'],
+    ['exchange', 'Out exchange'],
+    ['versioned', 'Out versioned'],
+    ['wrapped', 'Out wrapped'],
+    ['other', 'Out other'],
+  ];
+  return labels
+    .map(([key, label]) => ({ key, label, count: counts.get(key) ?? 0 }))
+    .filter((g) => g.count > 0);
 }
 
-/** The concentration adjustment: a category multiple above the market's 75th percentile is dampened toward it, never trusted whole. */
-export function concentrationAdjustment(multiple: number, p75: number): number {
-  return multiple > p75 ? p75 / multiple : 1;
+/** The age band of a protocol, from its days since listing; null when it carries no date. */
+export function oddsBandFor(age: number | null): string {
+  if (age === null) return 'no date';
+  if (age < 183) return '<6mo';
+  if (age < 365) return '6-12mo';
+  if (age < 548) return '1-1.5y';
+  if (age < 730) return '1.5-2y';
+  if (age < 1095) return '2-3y';
+  return '3y+';
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** The token share of every age band, computed from the snapshot at run time. */
+export function computeOddsBands(snapshot: Snapshot, asOf: string): OddsBand[] {
+  const order = ['<6mo', '6-12mo', '1-1.5y', '1.5-2y', '2-3y', '3y+', 'no date'];
+  const totals = new Map<string, { total: number; tokened: number }>();
+  for (const band of order) totals.set(band, { total: 0, tokened: 0 });
+  for (const p of snapshot.protocols) {
+    const band = oddsBandFor(ageDays(asOf, p.listed_at));
+    const entry = totals.get(band)!;
+    entry.total += 1;
+    if (recordsToken(p)) entry.tokened += 1;
+  }
+  return order.map((band) => {
+    const entry = totals.get(band)!;
+    return { band, total: entry.total, tokened: entry.tokened, share: entry.total === 0 ? 0 : entry.tokened / entry.total };
+  });
+}
+
+/** The token-odds share of one age band, or null when the band holds no protocol. */
+export function oddsFor(age: number | null, bands: OddsBand[]): number | null {
+  const band = oddsBandFor(age);
+  const found = bands.find((b) => b.band === band);
+  if (found === undefined || found.total === 0) return null;
+  return Math.round(found.share * 1e4) / 1e4;
+}
+
+/** The multipliers and the implied value one protocol gets under the fitted curve. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  comps: Comparables,
+  fit: OlsFit,
+  interval: Interval,
+  bands: OddsBand[],
   model: ModelConstants,
   medianAge: number,
-): { implied: number; ratio: number; ratioN: number; ratioMedian: number | null; growthPct: number | null; momentum: number; maturity: number; concentration: number; age: number | null } {
+): {
+  implied: number;
+  intervalLo: number;
+  intervalHi: number;
+  p10: number;
+  p90: number;
+  tokenOdds: number | null;
+  log10Tvl: number;
+  log10Pred: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
-  const { ratio, n, median } = ratioFor(protocol.category, comps);
-  const { factor: momentum, growthPct } = momentumFactor(protocol.change_7d, model);
-  const { factor: maturity } = maturityFactor(age, medianAge, model);
-  const concentration = concentrationAdjustment(ratio, comps.p75);
-  const raw = protocol.tvl_usd * ratio * momentum * maturity * concentration;
-  const implied = Math.min(model.value_cap, Math.max(model.value_floor, Math.round(raw)));
-  return { implied, ratio, ratioN: n, ratioMedian: median, growthPct, momentum, maturity, concentration, age };
+  const log10Tvl = Math.log10(protocol.tvl_usd);
+  const log10Pred = fit.a + fit.b * log10Tvl;
+  const implied = olsPredict(protocol.tvl_usd, fit, model);
+  return {
+    implied,
+    intervalLo: Math.round(implied * interval.p25),
+    intervalHi: Math.round(implied * interval.p75),
+    p10: Math.round(implied * interval.p10),
+    p90: Math.round(implied * interval.p90),
+    tokenOdds: oddsFor(age, bands),
+    log10Tvl: Math.round(log10Tvl * 1e4) / 1e4,
+    log10Pred: Math.round(log10Pred * 1e4) / 1e4,
+    age,
+  };
 }
 
 /** A short dollar figure: $1.23B, $150.4M, $22.5M, $840K. */
@@ -406,10 +541,18 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
+/** The 7-day change as the verdict reads it: clamped so one wild week cannot carry a protocol, null when unreported. */
+export function growthPctOf(change7d: number | null): number | null {
+  if (change7d === null || !Number.isFinite(change7d)) return null;
+  return Math.min(120, Math.max(-60, change7d));
+}
+
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
-  const comps = computeComparables(snapshot.protocols, model);
+  const fit = fitOls(tokenizedPairs(snapshot.protocols));
+  const interval = looInterval(snapshot.protocols, model);
+  const bands = computeOddsBands(snapshot, snapshot.as_of);
   const medianAge = medianAgeOf(snapshot.protocols, snapshot.as_of, model.unknown_age_days);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but
@@ -425,8 +568,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, comps, model, medianAge);
-    const verdict = verdictFor(p, v.implied, v.growthPct, v.age, medianAge);
+    const v = impliedValue(p, snapshot.as_of, fit, interval, bands, model, medianAge);
+    const verdict = verdictFor(p, v.implied, growthPctOf(p.change_7d), v.age, medianAge);
     return { p, ...v, verdict: verdict.verdict, verdictReason: verdict.reason };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -445,16 +588,18 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    interval_lo_usd: s.intervalLo,
+    interval_hi_usd: s.intervalHi,
+    p10_usd: s.p10,
+    p90_usd: s.p90,
+    token_odds: s.tokenOdds,
     verdict: s.verdict,
     verdict_reason: s.verdictReason,
     model: {
-      ratio: round4(s.ratio),
-      ratio_n: s.ratioN,
-      ratio_median: s.ratioMedian === null ? null : round4(s.ratioMedian),
-      growth_pct: s.growthPct,
-      momentum_factor: round4(s.momentum),
-      maturity_factor: round4(s.maturity),
-      concentration_adjustment: round4(s.concentration),
+      ols_a: round4(fit.a),
+      ols_b: round4(fit.b),
+      log10_tvl: s.log10Tvl,
+      log10_pred: s.log10Pred,
       age_days: s.age,
     },
     farm_steps: buildFarmPlan(s.p, s.age, s.verdict, s.verdictReason).map(stepText),
@@ -695,11 +840,11 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    ratio: row.model.ratio,
-    ratio_n: row.model.ratio_n,
-    growth_multiplier: row.model.momentum_factor,
-    maturity_multiplier: row.model.maturity_factor,
-    concentration_adjustment: row.model.concentration_adjustment,
+    interval_lo_usd: row.interval_lo_usd,
+    interval_hi_usd: row.interval_hi_usd,
+    p10_usd: row.p10_usd,
+    p90_usd: row.p90_usd,
+    token_odds: row.token_odds,
     verdict: row.verdict,
     verdict_reason: row.verdict_reason,
     watchlist,
@@ -709,7 +854,10 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
-  const comps = computeComparables(snapshot.protocols, model);
+  const fit = fitOls(tokenizedPairs(snapshot.protocols));
+  const interval = looInterval(snapshot.protocols, model);
+  const ledger = computeLedger(snapshot);
+  const oddsBands = computeOddsBands(snapshot, snapshot.as_of);
   const medianAge = medianAgeOf(snapshot.protocols, snapshot.as_of, model.unknown_age_days);
   const live = liveRows(snapshot);
   const watchlist = new Set(snapshot.watchlist);
@@ -724,7 +872,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     early_size: early,
     live_size: live.length,
     median_age_days: medianAge,
-    comparables: comps,
+    ols: fit,
+    interval,
+    ledger,
+    ledger_total: ledger.reduce((a, g) => a + g.count, 0),
+    odds_bands: oddsBands,
     comparables_raw: snapshot.protocols
       .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
       .map((p): [string, number, number] => [p.category ?? 'Other', p.mcap_usd as number, p.tvl_usd]),
