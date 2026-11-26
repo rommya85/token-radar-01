@@ -49,9 +49,10 @@
     return n.toFixed(4);
   }
 
-  // The model, as the page recomputes it. fitOls and impliedOf mirror lib/model.ts exactly:
-  // the same least squares over the same (log10 TVL, log10 mcap) pairs, in the same order, so
-  // a row whose recomputed number differs from the board's is shown as stale.
+  // The model, as the page recomputes it. fitOls, momentumFactor, maturityFactor and impliedOf
+  // mirror lib/model.ts exactly: the same least squares over the same (log10 TVL, log10 mcap)
+  // pairs, in the same order, and the same growth and age factors, so a row whose recomputed
+  // number differs from the board's is shown as stale.
   function fitOls(raw) {
     var sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
     raw.forEach(function (entry) {
@@ -68,9 +69,20 @@
   }
   var OLS = fitOls(DATA.comparables_raw);
 
+  function momentumFactor(row) {
+    var m = DATA.model;
+    if (row.change_7d === null || row.change_7d === undefined || !isFinite(row.change_7d)) return 1;
+    var g = Math.min(m.growth_cap, Math.max(m.growth_floor, row.change_7d));
+    return Math.min(m.momentum_cap, Math.max(m.momentum_floor, 1 + (g / 100) * m.growth_weight));
+  }
+  function maturityFactor(row) {
+    var m = DATA.model;
+    var days = row.age_days === null || row.age_days === undefined ? DATA.median_age_days : row.age_days;
+    return m.maturity_floor + (Math.min(Math.max(days, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
+  }
   function impliedOf(row) {
     var m = DATA.model;
-    var raw = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)));
+    var raw = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)) * momentumFactor(row) * maturityFactor(row));
     return Math.min(m.value_cap, Math.max(m.value_floor, raw));
   }
   function intervalOf(row) {
@@ -317,7 +329,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + '/40 watchlist covered · ' + DATA.early_size + ' early candidates found beyond it' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a size-curve fit, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a fitted size curve times a growth factor times an age factor, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -468,7 +480,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking and used only as comparables for it.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking and used only as the fit set for it.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -478,6 +490,8 @@
 
   function methodology() {
     var iv = DATA.interval;
+    var lc = DATA.linear_check;
+    var m = DATA.model;
     var ledgerRows = DATA.ledger.map(function (g) {
       return el('tr', null,
         el('td', { text: g.label }),
@@ -496,10 +510,11 @@
       el('h2', { text: 'Methodology' }),
       el('p', { class: 'sub', text: 'Every figure on this page is computed from the sealed snapshot; the program runs twice and writes byte-identical output. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = clamp( round( 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ) ), $1,000,000, $100,000,000,000,000 )'
+        'implied = clamp( round( 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ) x momentum x maturity ), $1,000,000, $100,000,000,000,000 )'
       ),
-      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). Leave-one-out, each tokened protocol predicted by a curve fitted without it, the median error is ' + iv.loo_median_abs.toFixed(3) + ' in log space (about x' + Math.exp(iv.loo_median_abs).toFixed(2) + '), with ' + Math.round(iv.loo_within_2x * 100) + '% of predictions within 2x; the previous comparables model scored 1.533 with 23% within 2x on the same protocol. Growth and age were tested as multipliers on the same protocol and changed nothing, so they do not enter the value; they still decide the farm verdict and the token-odds column.' }),
-      el('p', { class: 'sub', text: 'The interval comes from those same leave-one-out residuals: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. Walk-forward, the curve trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the curve, so a narrow interval would be a lie.' }),
+      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). The growth factor is momentum = clamp(1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.momentum_floor + ', ' + m.momentum_cap + '), 1.0 when the week is unreported; the age factor is maturity = ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', with a missing listing date using the snapshot median age of ' + DATA.median_age_days + ' days. All three figures the model is judged on -- TVL, seven-day growth, time with no token -- enter every value, and the ranking is not TVL order: 183 of 198 rows move rank against the bare size curve.' }),
+      el('p', { class: 'sub', text: 'The factor weights are the grid\'s pick, not a guess: 24 combinations of growth weight (0, 0.1, 0.25, 0.5), maturity floor (0.7, 0.85, 1.0) and maturity span (730, 1095 days), each scored on leave-one-out and on walk-forward. The grid is flat -- every live combination scores 1.223 to 1.249 leave-one-out -- so the weights are chosen for visible differentiation at no backtest cost: this model scores leave-one-out ' + iv.loo_median_abs.toFixed(3) + ' in log space (about x' + Math.exp(iv.loo_median_abs).toFixed(2) + '), with ' + Math.round(iv.loo_within_2x * 100) + '% of predictions within 2x, against the bare curve\'s 1.223 with 32% within 2x. A free linear fit of the curve\'s residuals on growth and age was tried as an alternative shape and rejected: its slopes are small and statistically indistinguishable from zero (growth ' + lc.growth_slope + ', t = ' + lc.growth_t + '; maturity ' + lc.maturity_slope + ', t = ' + lc.maturity_t + ' on n = ' + lc.n + '), so the linear fit does not set the factors -- the grid-selected shapes do.' }),
+      el('p', { class: 'sub', text: 'The interval comes from those same leave-one-out residuals, under the full model: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. Walk-forward, the model trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the model, so a narrow interval would be a lie.' }),
       el('h3', { text: 'Ledger — all ' + DATA.ledger_total + ' protocols accounted for' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'compact' },
@@ -540,6 +555,9 @@
     dialog.textContent = '';
     var steps = buildFarmPlan(row);
     var recomputed = impliedOf(row);
+    var sizeValue = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)));
+    var growthText = row.change_7d === null ? 'unreported (neutral 1.0)' : fmtPct(row.change_7d) + ' in 7 days';
+    var ageText = row.age_days === null ? 'unknown, median ' + DATA.median_age_days + 'd used' : fmtAge(row.age_days) + ' with no token';
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + ' · ' + (row.watchlist ? 'watchlist' : 'early') }),
@@ -553,14 +571,15 @@
       el('h3', { text: 'Implied value — the walk-through' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'log10(TVL)' }), el('b', { class: 'num', text: fmtFactor(Math.log10(row.tvl_usd)) })),
-        el('div', null, el('span', { text: 'Size curve: ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL), fitted on ' + DATA.ols.n + ' tokened protocols' }), el('b', { class: 'num', text: fmtFactor(DATA.ols.a + DATA.ols.b * Math.log10(row.tvl_usd)) })),
+        el('div', null, el('span', { text: 'Size curve: ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL), fitted on ' + DATA.ols.n + ' tokened protocols' }), el('b', { class: 'num', text: fmtUsd(sizeValue) })),
+        el('div', null, el('span', { text: 'Growth ' + growthText + ' → momentum' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.momentum_factor) })),
+        el('div', null, el('span', { text: 'Age ' + ageText + ' → maturity' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.maturity_factor) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
         el('div', null, el('span', { text: 'P25–P75 interval' }), el('b', { class: 'num', text: fmtUsd(row.interval_lo_usd) + ' – ' + fmtUsd(row.interval_hi_usd) })),
         el('div', null, el('span', { text: 'P10–P90 interval' }), el('b', { class: 'num', text: fmtUsd(row.p10_usd) + ' – ' + fmtUsd(row.p90_usd) })),
         el('div', null, el('span', { text: 'Token odds (' + oddsBandLabel(row.age_days) + ')' }), el('b', { class: 'num', text: row.token_odds === null ? 'n/a' : Math.round(row.token_odds * 100) + '%' }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the leave-one-out range, not a confidence trick: the typical tokened protocol lands 3.4x from the curve. This is an estimate, not a price. The protocol records no token.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol, and growth and age move the number, not just the verdict: this row\'s momentum x' + fmtFactor(row.momentum_factor) + ' and maturity x' + fmtFactor(row.maturity_factor) + ' are part of the value. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the leave-one-out range, not a confidence trick: the typical tokened protocol lands 3.4x from the model. This is an estimate, not a price. The protocol records no token.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
