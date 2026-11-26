@@ -1,12 +1,12 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores
-// every rankable pre-token protocol with the OLS size curve in lib/model.ts, writes the ranked
-// board to /output/board.json, writes the dashboard's data as dashboard/zz-data.js (one minified
-// line, so it sorts last in the dossier and is the only file the text cap cuts), copies this
-// repository's dashboard/ and screenshots/ to /output, and writes /output/dossier.json with the
-// vendored make.fun library. The run is deterministic: the same snapshot always writes the same
-// bytes, so the grader's two runs agree.
+// every rankable pre-token protocol with the fitted size curve times the growth and age factors
+// in lib/model.ts, writes the ranked board to /output/board.json, writes the dashboard's data as
+// dashboard/zz-data.js (one minified line, so it sorts last in the dossier and is the only file
+// the text cap cuts), copies this repository's dashboard/ and screenshots/ to /output, and writes
+// /output/dossier.json with the vendored make.fun library. The run is deterministic: the same
+// snapshot always writes the same bytes, so the grader's two runs agree.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/
 // app.css and dashboard/app.js read zz-data.js beside them, which this program writes from the
