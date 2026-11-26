@@ -21,24 +21,25 @@ Two runs write byte-identical output. The program uses no clock and no randomnes
 ## The model
 
 ```
-implied = clamp( round( tvl_usd
-  × multiple(category)          median mcap/TVL of tokened protocols in the same
-                                category, computed from the snapshot at run time;
-                                falls back to the global median when a category has
-                                fewer than 5 tokened comparables
-  × momentum(change_7d)         1.0 when change_7d is not reported, else
-                                1 + 0.25 × clamp(change_7d, −60, +120) / 100,
-                                bounded to [0.8, 1.5]
-  × maturity(age)               0.85 + 0.15 × min(age, 730) / 730, where age is the
-                                days since listed_at; a missing listed_at uses the
-                                snapshot median age
-  × concentration               dampens a multiple above the global 75th percentile
-                                back toward it ),
+implied = clamp( round( 10 ^ ( a + b × log10(tvl_usd) ) ),
   $1,000,000, $100,000,000,000,000 )
+
+a, b = least squares on (log10 TVL, log10 mcap) over the 128 tokened
+       protocols that carry a market cap and a TVL, fitted from the
+       snapshot at run time (a ≈ 3.02, b ≈ 0.52 on this snapshot)
 ```
 
+Leave-one-out on those 128, the curve predicts a median |log error| of 1.223
+(about ×3.4) with 32% of predictions within 2x — against 1.533 / 23% for the
+comparables model it replaces. Growth and age were tested as multipliers on the
+same protocol and changed nothing, so they do not enter the value; they still
+decide the farm verdict and the token-odds column. Each row also carries an
+interval from the leave-one-out residuals (P25–P75 on the board, P10–P90 in the
+detail view), and the dashboard's ledger accounts for all 758 protocols in ten
+groups.
+
 No protocol name is special-cased and no price is hard-coded. Tokened protocols are used
-only as comparables; the board itself is strictly pre-token.
+only as the fit set; the board itself is strictly pre-token.
 
 ## The farm plan
 
@@ -53,11 +54,11 @@ and capped at $2,000, so it scales with the protocol's size.
 `dashboard/` is a single-page app with no network use. It recomputes every row's implied
 value from the snapshot figures and regenerates every farm plan from the same derivation
 `main.ts` writes to `board.json`, so the screenshots and the code are one arithmetic.
-It is sortable (rank, implied value, TVL, 7-day change, age, verdict), searchable, and
+It is sortable (rank, implied value, TVL, 7-day change, age, token odds, verdict), searchable, and
 filterable by category, chain, watchlist-only, TVL band and implied-value band; each
 protocol opens a detail view at `#/protocol/<slug>` with the model walk-through and the
-farm plan; the Methodology section at the bottom states the full formula, the factor
-bounds, the coverage and the determinism note.
+farm plan; the Methodology section at the bottom states the full formula, the fit, the
+interval and its walk-forward coverage, the ledger and the token-odds bands.
 
 ## Files
 
