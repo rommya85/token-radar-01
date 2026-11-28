@@ -64,6 +64,10 @@ a { color: var(--accent); }
 .lede p { color: var(--muted); max-width: 62ch; margin-top: var(--s2); }
 .facts { display: grid; gap: var(--s2); align-content: start; border-left: 1px solid var(--border); padding-left: var(--s5); }
 .ledger { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: var(--s3); color: var(--muted); font-size: 13px; }
+.strip { margin-top: var(--s4); padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-panel); font-size: 13px; color: var(--muted); }
+.strip p { margin: 0; }
+.strip b { color: var(--ink); }
+.verdict-cell { display: grid; gap: 2px; justify-items: start; }
 .fact { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
 .fact b { font-family: var(--font-num); font-size: 15px; font-weight: 500; }
 .fact span { color: var(--muted); font-size: 13px; }

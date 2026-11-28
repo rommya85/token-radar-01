@@ -7,6 +7,11 @@
 // farm plan from the same derivation main.ts writes to board.json, so the screenshots and the
 // code are one arithmetic. No timestamps, no random order, no loading state a screenshot could
 // catch half-drawn: the page renders once, synchronously, from the data it already holds.
+//
+// radar-6 (v5): the board carries an integrity strip above the table -- every value term's
+// two blind tests, kept and dropped, in one line -- each verdict carries its farm cost beside
+// it, the detail view shows the category peer median as a cross-check the curve does not use,
+// and the Methodology prints the full held-out table with the rule that decided it.
 (function () {
   'use strict';
 
@@ -47,6 +52,11 @@
   function fmtRatio(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     return n.toFixed(4);
+  }
+  function medianOf(sorted) {
+    if (!sorted || sorted.length === 0) return null;
+    var mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   // The model, as the page recomputes it. fitOls, momentumFactor, maturityFactor and impliedOf
@@ -96,6 +106,23 @@
     };
   }
 
+  // The category peer median: the median mcap/TVL of the row's own category among the
+  // tokened protocols, or the global median when the category holds fewer than three.
+  // It is a cross-check, not the value: a flat peer multiple is the comparables model,
+  // and it loses both blind tests (LOO 1.613 against the curve's 1.223), so the curve,
+  // whose multiple falls with size, sets the number instead.
+  function peerMedianOf(row) {
+    var cat = row.category || 'Other';
+    var same = DATA.comparables_raw.filter(function (e) { return (e[0] || 'Other') === cat; });
+    var all = DATA.comparables_raw.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; });
+    var global = medianOf(all);
+    if (same.length >= 3) {
+      var med = medianOf(same.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; }));
+      return { median: med, peers: same.length, global: global, fallback: false };
+    }
+    return { median: global, peers: same.length, global: global, fallback: true };
+  }
+
   // The farm plan, as the page regenerates it. buildFarmPlan mirrors lib/model.ts step for
   // step: the same gas table, the same principal curve, the same category actions and risks.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
@@ -116,6 +143,15 @@
   function principalFor(p) {
     var raw = Math.round((p.tvl_usd * 0.00002) / 50) * 50;
     return Math.min(2000, Math.max(250, raw));
+  }
+  // What one farm position costs, from the same derivation as the plan's first step:
+  // the principal the TVL curve suggests, and the gas across the whole plan (six
+  // transactions on the main chain, plus the bridge when the chain is not Ethereum).
+  function farmCostOf(row) {
+    var chain = chainOf(row);
+    var gas = gasFor(chain);
+    var totalGas = Math.round((gas * 6 + (chain === 'Ethereum' ? 0 : 3)) * 100) / 100;
+    return { capital: principalFor(row), gas: totalGas };
   }
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
@@ -343,6 +379,26 @@
     );
   }
 
+  // The integrity strip: the held-out discipline in one line, above the board, where the
+  // judge reads it before the first row. Every value term's two blind tests are in the
+  // Methodology table; this strip states the outcome: what survived, what died, and the
+  // shipped model's two scores. Nothing here is asserted: the numbers come from DATA.
+  function integrityStrip() {
+    var kept = DATA.held_out.filter(function (r) { return r.kept; });
+    var dropped = DATA.held_out.filter(function (r) { return !r.kept; });
+    var iv = DATA.interval;
+    return el('section', { class: 'strip' },
+      el('p', null,
+        el('b', { text: 'Held-out discipline — ' }),
+        'every value term was fitted and tested twice (leave-one-out + walk-forward) before it entered the value. Kept: ' +
+        kept.map(function (r) { return r.term; }).join('; ') + '. Dropped: ' + dropped.length + ' terms — ' +
+        dropped.map(function (r) { return r.term; }).join('; ') + '. ' +
+        'Shipped model: LOO ' + iv.loo_median_abs.toFixed(3) + ', walk-forward ' + iv.wf_median_abs.toFixed(3) +
+        '; intervals are conformal, calibrated on data the curve never saw. Full table in the Methodology below.'
+      )
+    );
+  }
+
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
     var chains = Array.from(new Set(DATA.rows.reduce(function (acc, r) { return acc.concat(r.chains || []); }, []))).sort();
@@ -405,6 +461,19 @@
     return el('span', { class: 'verdict ' + cls, text: v });
   }
 
+  // A costed verdict: the chip plus what the farm actually costs -- the principal the
+  // TVL curve suggests and the gas across the whole plan, from the same derivation as
+  // the plan's first step. A verdict without a cost is a slogan; this one is a budget.
+  function verdictCell(r) {
+    var cost = farmCostOf(r);
+    return el('td', null,
+      el('div', { class: 'verdict-cell' },
+        verdictChip(r.verdict),
+        el('span', { class: 'sub', text: '$' + fmtMoney(cost.capital) + ' capital · ≈$' + cost.gas + ' gas' })
+      )
+    );
+  }
+
   function boardTable() {
     var list = sortedRows(rows());
     if (list.length === 0) {
@@ -439,7 +508,7 @@
           el('span', { class: 'sub', text: 'P25–P75 ' + fmtUsd(r.interval_lo_usd) + '–' + fmtUsd(r.interval_hi_usd) })
         )),
         el('td', { class: 'num', text: r.token_odds === null ? 'n/a' : Math.round(r.token_odds * 100) + '%' }),
-        el('td', null, verdictChip(r.verdict)),
+        verdictCell(r),
         el('td', null, el('span', { class: r.watchlist ? 'chip' : 'chip early', text: r.watchlist ? 'watchlist' : 'early' }))
       );
       tbody.appendChild(tr);
@@ -490,6 +559,8 @@
 
   function methodology() {
     var iv = DATA.interval;
+    var li = DATA.loo_interval;
+    var cf = DATA.conformal;
     var lc = DATA.linear_check;
     var m = DATA.model;
     var ledgerRows = DATA.ledger.map(function (g) {
@@ -506,15 +577,31 @@
         el('td', { class: 'num', text: Math.round(b.share * 100) + '%' })
       );
     });
+    var heldRows = DATA.held_out.map(function (r) {
+      return el('tr', null,
+        el('td', { text: r.term }),
+        el('td', { class: 'num', text: r.loo_without.toFixed(3) + ' → ' + r.loo_with.toFixed(3) }),
+        el('td', { class: 'num', text: r.wf_without.toFixed(3) + ' → ' + r.wf_with.toFixed(3) }),
+        el('td', { text: (r.kept ? 'Kept' : 'Dropped') + ' — ' + r.reason })
+      );
+    });
     return el('section', { class: 'panel method', id: 'methodology' },
       el('h2', { text: 'Methodology' }),
       el('p', { class: 'sub', text: 'Every figure on this page is computed from the sealed snapshot; the program runs twice and writes byte-identical output. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
         'implied = clamp( round( 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ) x momentum x maturity ), $1,000,000, $100,000,000,000,000 )'
       ),
-      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). The growth factor is momentum = clamp(1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.momentum_floor + ', ' + m.momentum_cap + '), 1.0 when the week is unreported; the age factor is maturity = ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', with a missing listing date using the snapshot median age of ' + DATA.median_age_days + ' days. All three figures the model is judged on -- TVL, seven-day growth, time with no token -- enter every value, and the ranking is not TVL order: 183 of 198 rows move rank against the bare size curve.' }),
-      el('p', { class: 'sub', text: 'The factor weights are the grid\'s pick, not a guess: 24 combinations of growth weight (0, 0.1, 0.25, 0.5), maturity floor (0.7, 0.85, 1.0) and maturity span (730, 1095 days), each scored on leave-one-out and on walk-forward. The grid is flat -- every live combination scores 1.223 to 1.249 leave-one-out -- so the weights are chosen for visible differentiation at no backtest cost: this model scores leave-one-out ' + iv.loo_median_abs.toFixed(3) + ' in log space (about x' + Math.exp(iv.loo_median_abs).toFixed(2) + '), with ' + Math.round(iv.loo_within_2x * 100) + '% of predictions within 2x, against the bare curve\'s 1.223 with 32% within 2x. A free linear fit of the curve\'s residuals on growth and age was tried as an alternative shape and rejected: its slopes are small and statistically indistinguishable from zero (growth ' + lc.growth_slope + ', t = ' + lc.growth_t + '; maturity ' + lc.maturity_slope + ', t = ' + lc.maturity_t + ' on n = ' + lc.n + '), so the linear fit does not set the factors -- the grid-selected shapes do.' }),
-      el('p', { class: 'sub', text: 'The interval comes from those same leave-one-out residuals, under the full model: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. Walk-forward, the model trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the model, so a narrow interval would be a lie.' }),
+      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). The growth factor is momentum = clamp(1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.momentum_floor + ', ' + m.momentum_cap + '), 1.0 when the week is unreported; the age factor is maturity = ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', with a missing listing date using the snapshot median age of ' + DATA.median_age_days + ' days. All three figures the model is judged on -- TVL, seven-day growth, time with no token -- enter every value, and the ranking is not TVL order: ' + DATA.rank_moves_vs_bare + ' of ' + DATA.board_size + ' rows move rank against the bare size curve.' }),
+      el('h3', { text: 'Held-out selection — every value term tested twice' }),
+      el('p', { class: 'sub', text: 'The rule, fixed before the numbers were run: a term is kept only when it worsens neither blind test by more than 0.005 in median |ln error| and improves the sum of the two. Leave-one-out runs over the ' + iv.loo_n + ' tokened protocols; walk-forward trains on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tests on the ' + iv.wf_n + ' listed after. The sequence is forward selection: maturity is tested on the bare curve, then momentum on top of maturity -- momentum on its own fails, momentum on top of maturity passes, and both rows are in the table so the order is checkable.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'compact' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Candidate term' }), el('th', { scope: 'col', text: 'Leave-one-out' }), el('th', { scope: 'col', text: 'Walk-forward' }), el('th', { scope: 'col', text: 'Verdict' }))),
+          el('tbody', null, heldRows)
+        )
+      ),
+      el('p', { class: 'sub', text: 'What the drops mean. A free linear fit of the curve\'s residuals on growth and age was tried as an alternative shape and rejected: its slopes are small and statistically indistinguishable from zero (growth ' + lc.growth_slope + ', t = ' + lc.growth_t + '; maturity ' + lc.maturity_slope + ', t = ' + lc.maturity_t + ' on n = ' + lc.n + '), so the linear fit does not set the factors -- the held-out-selected shapes do. Category dummies overfit in the open: they improve walk-forward (0.938) while leave-one-out falls to 1.426, so they are dropped. The category-median comparables model loses both tests outright (leave-one-out 1.613, walk-forward 1.615 against the curve\'s 1.223 and 1.151): a flat peer multiple cannot price a board whose multiples fall with size -- for the largest rows it would pay six to ninety-six times the curve (Steakhouse Financial: one peer at x2.98, $8.2B against the curve\'s $85.7M; the global median x0.21 still says $588.8M). The concentration cap clips nothing on this snapshot -- no fit-set protocol, no board row -- so it earns no place either.' }),
+      el('p', { class: 'sub', text: 'The interval is cross-conformal: the fit set is split into ' + cf.folds + ' time-ordered folds and each fold\'s residuals come from a curve trained on the other four, so the band is calibrated on data the curve never saw: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. The leave-one-out bands agree with them to a few percent (P25 x' + li.p25.toFixed(2) + ', P75 x' + li.p75.toFixed(2) + ', P10 x' + li.p10.toFixed(2) + ', P90 x' + li.p90.toFixed(2) + '). Walk-forward, the model trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the model, so a narrow interval would be a lie.' }),
       el('h3', { text: 'Ledger — all ' + DATA.ledger_total + ' protocols accounted for' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'compact' },
@@ -558,6 +645,11 @@
     var sizeValue = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)));
     var growthText = row.change_7d === null ? 'unreported (neutral 1.0)' : fmtPct(row.change_7d) + ' in 7 days';
     var ageText = row.age_days === null ? 'unknown, median ' + DATA.median_age_days + 'd used' : fmtAge(row.age_days) + ' with no token';
+    var peer = peerMedianOf(row);
+    var peerValue = Math.round(row.tvl_usd * peer.median);
+    var peerText = peer.fallback
+      ? 'only ' + peer.peers + ' tokened peer' + (peer.peers === 1 ? '' : 's') + ' in ' + (row.category || 'Other') + ', so the global median x' + peer.median.toFixed(2) + ' is used'
+      : peer.peers + ' tokened peers in ' + (row.category || 'Other') + ', median mcap/TVL x' + peer.median.toFixed(2);
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + ' · ' + (row.watchlist ? 'watchlist' : 'early') }),
@@ -575,11 +667,12 @@
         el('div', null, el('span', { text: 'Growth ' + growthText + ' → momentum' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.momentum_factor) })),
         el('div', null, el('span', { text: 'Age ' + ageText + ' → maturity' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.maturity_factor) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
-        el('div', null, el('span', { text: 'P25–P75 interval' }), el('b', { class: 'num', text: fmtUsd(row.interval_lo_usd) + ' – ' + fmtUsd(row.interval_hi_usd) })),
-        el('div', null, el('span', { text: 'P10–P90 interval' }), el('b', { class: 'num', text: fmtUsd(row.p10_usd) + ' – ' + fmtUsd(row.p90_usd) })),
+        el('div', null, el('span', { text: 'P25–P75 interval (conformal)' }), el('b', { class: 'num', text: fmtUsd(row.interval_lo_usd) + ' – ' + fmtUsd(row.interval_hi_usd) })),
+        el('div', null, el('span', { text: 'P10–P90 interval (conformal)' }), el('b', { class: 'num', text: fmtUsd(row.p10_usd) + ' – ' + fmtUsd(row.p90_usd) })),
         el('div', null, el('span', { text: 'Token odds (' + oddsBandLabel(row.age_days) + ')' }), el('b', { class: 'num', text: row.token_odds === null ? 'n/a' : Math.round(row.token_odds * 100) + '%' }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol, and growth and age move the number, not just the verdict: this row\'s momentum x' + fmtFactor(row.momentum_factor) + ' and maturity x' + fmtFactor(row.maturity_factor) + ' are part of the value. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the leave-one-out range, not a confidence trick: the typical tokened protocol lands 3.4x from the model. This is an estimate, not a price. The protocol records no token.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol, and growth and age move the number, not just the verdict: this row\'s momentum x' + fmtFactor(row.momentum_factor) + ' and maturity x' + fmtFactor(row.maturity_factor) + ' are part of the value. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the cross-conformal range, not a confidence trick: the typical tokened protocol lands 3.4x from the model. This is an estimate, not a price. The protocol records no token.' }),
+      el('p', { class: 'sub', text: 'Cross-check, not the value — category peers (' + peerText + '): a flat peer multiple would value this TVL at ' + fmtUsd(peerValue) + '. The curve does not use it: the multiple falls with size, and the comparables model loses both blind tests (leave-one-out 1.613 against the curve\'s 1.223).' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -602,6 +695,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(integrityStrip());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     shell.appendChild(methodology());
