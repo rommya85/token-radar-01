@@ -8,10 +8,11 @@
 // code are one arithmetic. No timestamps, no random order, no loading state a screenshot could
 // catch half-drawn: the page renders once, synchronously, from the data it already holds.
 //
-// radar-6 (v5): the board carries an integrity strip above the table -- every value term's
+// radar-7 (v6): the board carries an integrity strip above the table -- every value term's
 // two blind tests, kept and dropped, in one line -- each verdict carries its farm cost beside
-// it, the detail view shows the category peer median as a cross-check the curve does not use,
-// and the Methodology prints the full held-out table with the rule that decided it.
+// it, the detail view walks the 5% peer pull inside the value (the curve, then the pull
+// toward the category median, then the two factors), and the Methodology prints the full
+// held-out table with the rule that decided it.
 (function () {
   'use strict';
 
@@ -59,10 +60,11 @@
     return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  // The model, as the page recomputes it. fitOls, momentumFactor, maturityFactor and impliedOf
-  // mirror lib/model.ts exactly: the same least squares over the same (log10 TVL, log10 mcap)
-  // pairs, in the same order, and the same growth and age factors, so a row whose recomputed
-  // number differs from the board's is shown as stale.
+  // The model, as the page recomputes it. fitOls, momentumFactor, maturityFactor, blendOf and
+  // impliedOf mirror lib/model.ts exactly: the same least squares over the same (log10 TVL,
+  // log10 mcap) pairs, in the same order, the same peer median from the same pool, and the
+  // same growth and age factors, so a row whose recomputed number differs from the board's is
+  // shown as stale.
   function fitOls(raw) {
     var sx = 0, sy = 0, sxx = 0, sxy = 0, n = 0;
     raw.forEach(function (entry) {
@@ -90,9 +92,39 @@
     var days = row.age_days === null || row.age_days === undefined ? DATA.median_age_days : row.age_days;
     return m.maturity_floor + (Math.min(Math.max(days, 0), m.maturity_days) / m.maturity_days) * m.maturity_range;
   }
+  // The category peer median: the median mcap/TVL of the row's own category among the
+  // tokened protocols, or the global median when the category holds fewer than three.
+  // It is 5% of the value now: the blend pulls the curve toward it, because that weight
+  // passed both blind tests while the full peer multiple still loses both (LOO 1.613
+  // against the curve's 1.223), so the curve, whose multiple falls with size, still sets
+  // the number -- the peers only pull it.
+  function peerMedianOf(row) {
+    var cat = row.category || 'Other';
+    var same = DATA.comparables_raw.filter(function (e) { return (e[0] || 'Other') === cat; });
+    var all = DATA.comparables_raw.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; });
+    var global = medianOf(all);
+    if (same.length >= 3) {
+      var med = medianOf(same.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; }));
+      return { median: med, peers: same.length, global: global, fallback: false };
+    }
+    return { median: global, peers: same.length, global: global, fallback: true };
+  }
+  // The curve and its 5% peer pull, in the same order lib/model.ts applies them: the
+  // size-curve value, the peer-median value the TVL is pulled toward (rounded to the
+  // dollar, as the model does), and the geometric blend between them.
+  function blendOf(row) {
+    var m = DATA.model;
+    var curve = Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd));
+    var peer = peerMedianOf(row);
+    var peerValue = Math.round(row.tvl_usd * peer.median);
+    var w = m.blend_weight || 0;
+    var blended = peerValue > 0 ? Math.exp((1 - w) * Math.log(curve) + w * Math.log(peerValue)) : curve;
+    return { curve: curve, peer: peer, peerValue: peerValue, blended: blended, weight: w };
+  }
   function impliedOf(row) {
     var m = DATA.model;
-    var raw = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)) * momentumFactor(row) * maturityFactor(row));
+    var b = blendOf(row);
+    var raw = Math.round(b.blended * momentumFactor(row) * maturityFactor(row));
     return Math.min(m.value_cap, Math.max(m.value_floor, raw));
   }
   function intervalOf(row) {
@@ -104,23 +136,6 @@
       p10: Math.round(implied * iv.p10),
       p90: Math.round(implied * iv.p90)
     };
-  }
-
-  // The category peer median: the median mcap/TVL of the row's own category among the
-  // tokened protocols, or the global median when the category holds fewer than three.
-  // It is a cross-check, not the value: a flat peer multiple is the comparables model,
-  // and it loses both blind tests (LOO 1.613 against the curve's 1.223), so the curve,
-  // whose multiple falls with size, sets the number instead.
-  function peerMedianOf(row) {
-    var cat = row.category || 'Other';
-    var same = DATA.comparables_raw.filter(function (e) { return (e[0] || 'Other') === cat; });
-    var all = DATA.comparables_raw.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; });
-    var global = medianOf(all);
-    if (same.length >= 3) {
-      var med = medianOf(same.map(function (e) { return e[1] / e[2]; }).sort(function (a, b) { return a - b; }));
-      return { median: med, peers: same.length, global: global, fallback: false };
-    }
-    return { median: global, peers: same.length, global: global, fallback: true };
   }
 
   // The farm plan, as the page regenerates it. buildFarmPlan mirrors lib/model.ts step for
@@ -365,7 +380,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + '/40 watchlist covered · ' + DATA.early_size + ' early candidates found beyond it' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a fitted size curve times a growth factor times an age factor, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL that records no token. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value is a fitted size curve pulled 5% toward the category peer median, times a growth factor times an age factor, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -410,7 +425,7 @@
     );
     catSelect.addEventListener('change', function () { state.category = catSelect.value; writeHash(); renderBoard(); });
     var chainSelect = el('select', { id: 'chain', 'aria-label': 'Filter by chain' },
-      el('option', { value: 'all', text: 'All chains' }),
+      el('option', { value: 'all', text: 'Any chain' }),
       chains.map(function (c) { return el('option', { value: c, text: c, selected: c === state.chain ? 'selected' : null }); })
     );
     chainSelect.addEventListener('change', function () { state.chain = chainSelect.value; writeHash(); renderBoard(); });
@@ -589,19 +604,19 @@
       el('h2', { text: 'Methodology' }),
       el('p', { class: 'sub', text: 'Every figure on this page is computed from the sealed snapshot; the program runs twice and writes byte-identical output. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = clamp( round( 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ) x momentum x maturity ), $1,000,000, $100,000,000,000,000 )'
+        'implied = clamp( round( exp( ' + (1 - m.blend_weight) + ' x ln(curve) + ' + m.blend_weight + ' x ln(peer) ) x momentum x maturity ), $1,000,000, $100,000,000,000,000 ) — curve = 10 ^ ( ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(tvl_usd) ), peer = tvl_usd x category peer median'
       ),
-      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). The growth factor is momentum = clamp(1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.momentum_floor + ', ' + m.momentum_cap + '), 1.0 when the week is unreported; the age factor is maturity = ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', with a missing listing date using the snapshot median age of ' + DATA.median_age_days + ' days. All three figures the model is judged on -- TVL, seven-day growth, time with no token -- enter every value, and the ranking is not TVL order: ' + DATA.rank_moves_vs_bare + ' of ' + DATA.board_size + ' rows move rank against the bare size curve.' }),
+      el('p', { class: 'sub', text: 'The size curve is fitted on the ' + DATA.ols.n + ' tokened protocols that carry a market cap and a TVL: least squares on (log10 TVL, log10 mcap) gives log10(mcap) = ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL). The peer pull takes the curve 5% of the way toward the protocol\'s category peer median in log space -- its TVL times the median mcap/TVL of its own category among the tokened protocols, or the global median when the category holds fewer than three -- because that weight passed both blind tests while the full peer multiple still loses both. The growth factor is momentum = clamp(1 + ' + m.growth_weight + ' x clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100, ' + m.momentum_floor + ', ' + m.momentum_cap + '), 1.0 when the week is unreported; the age factor is maturity = ' + m.maturity_floor + ' + ' + m.maturity_range + ' x min(age, ' + m.maturity_days + ') / ' + m.maturity_days + ', with a missing listing date using the snapshot median age of ' + DATA.median_age_days + ' days. All three figures the model is judged on -- TVL, seven-day growth, time with no token -- enter every value, and the ranking is not TVL order: ' + DATA.rank_moves_vs_bare + ' of ' + DATA.board_size + ' rows move rank against the bare size curve.' }),
       el('h3', { text: 'Held-out selection — every value term tested twice' }),
-      el('p', { class: 'sub', text: 'The rule, fixed before the numbers were run: a term is kept only when it worsens neither blind test by more than 0.005 in median |ln error| and improves the sum of the two. Leave-one-out runs over the ' + iv.loo_n + ' tokened protocols; walk-forward trains on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tests on the ' + iv.wf_n + ' listed after. The sequence is forward selection: maturity is tested on the bare curve, then momentum on top of maturity -- momentum on its own fails, momentum on top of maturity passes, and both rows are in the table so the order is checkable.' }),
+      el('p', { class: 'sub', text: 'The rule, fixed before the numbers were run: a term is kept only when it worsens neither blind test by more than 0.005 in median |ln error| and improves the sum of the two. Leave-one-out runs over the ' + iv.loo_n + ' tokened protocols; walk-forward trains on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tests on the ' + iv.wf_n + ' listed after. The sequence is forward selection: maturity is tested on the bare curve, then momentum on top of maturity -- momentum on its own fails, momentum on top of maturity passes -- and the peer blend is tested last, on top of momentum and maturity, so the order is checkable.' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'compact' },
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Candidate term' }), el('th', { scope: 'col', text: 'Leave-one-out' }), el('th', { scope: 'col', text: 'Walk-forward' }), el('th', { scope: 'col', text: 'Verdict' }))),
           el('tbody', null, heldRows)
         )
       ),
-      el('p', { class: 'sub', text: 'What the drops mean. A free linear fit of the curve\'s residuals on growth and age was tried as an alternative shape and rejected: its slopes are small and statistically indistinguishable from zero (growth ' + lc.growth_slope + ', t = ' + lc.growth_t + '; maturity ' + lc.maturity_slope + ', t = ' + lc.maturity_t + ' on n = ' + lc.n + '), so the linear fit does not set the factors -- the held-out-selected shapes do. Category dummies overfit in the open: they improve walk-forward (0.938) while leave-one-out falls to 1.426, so they are dropped. The category-median comparables model loses both tests outright (leave-one-out 1.613, walk-forward 1.615 against the curve\'s 1.223 and 1.151): a flat peer multiple cannot price a board whose multiples fall with size -- for the largest rows it would pay six to ninety-six times the curve (Steakhouse Financial: one peer at x2.98, $8.2B against the curve\'s $85.7M; the global median x0.21 still says $588.8M). The concentration cap clips nothing on this snapshot -- no fit-set protocol, no board row -- so it earns no place either.' }),
-      el('p', { class: 'sub', text: 'The interval is cross-conformal: the fit set is split into ' + cf.folds + ' time-ordered folds and each fold\'s residuals come from a curve trained on the other four, so the band is calibrated on data the curve never saw: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. The leave-one-out bands agree with them to a few percent (P25 x' + li.p25.toFixed(2) + ', P75 x' + li.p75.toFixed(2) + ', P10 x' + li.p10.toFixed(2) + ', P90 x' + li.p90.toFixed(2) + '). Walk-forward, the model trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands 3.4x from the model, so a narrow interval would be a lie.' }),
+      el('p', { class: 'sub', text: 'What the drops mean. A free linear fit of the curve\'s residuals on growth and age was tried as an alternative shape and rejected: its slopes are small and statistically indistinguishable from zero (growth ' + lc.growth_slope + ', t = ' + lc.growth_t + '; maturity ' + lc.maturity_slope + ', t = ' + lc.maturity_t + ' on n = ' + lc.n + '), so the linear fit does not set the factors -- the held-out-selected shapes do. Category dummies overfit in the open: they improve walk-forward (0.938) while leave-one-out falls to 1.426, so they are dropped. The category-median comparables model loses both tests outright (leave-one-out 1.613, walk-forward 1.615 against the curve\'s 1.223 and 1.151): a flat peer multiple cannot price a board whose multiples fall with size -- on the largest rows the peer value runs to 6.5x the curve. Steakhouse Financial shows why the pull is only 5%: the curve says $90.1M, the global median x0.21 says $588.8M, its one Risk Curators peer at x2.97 would say $8.2B -- and the 5% pull lands at $99.0M, barely moved. A 5% blend of the same peer median into the curve, by contrast, improves both tests (leave-one-out 1.204, walk-forward 1.046 against 1.224 and 1.136): the peers carry signal, just not the whole value -- so the blend, not the multiple, is the shipped model. The concentration cap clips nothing on this snapshot -- no fit-set protocol, no board row -- so it earns no place either.' }),
+      el('p', { class: 'sub', text: 'The interval is cross-conformal: the fit set is split into ' + cf.folds + ' time-ordered folds and each fold\'s residuals come from a curve trained on the other four, so the band is calibrated on data the curve never saw: P25 x' + iv.p25.toFixed(2) + ', P75 x' + iv.p75.toFixed(2) + ', P10 x' + iv.p10.toFixed(2) + ', P90 x' + iv.p90.toFixed(2) + '. The board shows P25–P75 under each implied value; the detail view shows P10–P90 as well. The leave-one-out bands agree with them to a few percent (P25 x' + li.p25.toFixed(2) + ', P75 x' + li.p75.toFixed(2) + ', P10 x' + li.p10.toFixed(2) + ', P90 x' + li.p90.toFixed(2) + '). Walk-forward, the model trained on the tokens listed before ' + DATA.model.walk_forward_cutoff + ' and tested on the ' + iv.wf_n + ' listed after, covered ' + Math.round(iv.wf_p2575 * 100) + '% inside P25–P75 (stated 50%) and ' + Math.round(iv.wf_p1090 * 100) + '% inside P10–P90 (stated 80%), with a median error of ' + iv.wf_median_abs.toFixed(3) + '. The range is honest about its own width: the typical tokened protocol lands ' + Math.exp(iv.loo_median_abs).toFixed(1) + 'x from the model, so a narrow interval would be a lie.' }),
       el('h3', { text: 'Ledger — all ' + DATA.ledger_total + ' protocols accounted for' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'compact' },
@@ -642,11 +657,13 @@
     dialog.textContent = '';
     var steps = buildFarmPlan(row);
     var recomputed = impliedOf(row);
-    var sizeValue = Math.round(Math.pow(10, OLS.a + OLS.b * Math.log10(row.tvl_usd)));
+    var blend = blendOf(row);
+    var sizeValue = Math.round(blend.curve);
+    var blendedValue = Math.round(blend.blended);
     var growthText = row.change_7d === null ? 'unreported (neutral 1.0)' : fmtPct(row.change_7d) + ' in 7 days';
     var ageText = row.age_days === null ? 'unknown, median ' + DATA.median_age_days + 'd used' : fmtAge(row.age_days) + ' with no token';
-    var peer = peerMedianOf(row);
-    var peerValue = Math.round(row.tvl_usd * peer.median);
+    var peer = blend.peer;
+    var peerValue = blend.peerValue;
     var peerText = peer.fallback
       ? 'only ' + peer.peers + ' tokened peer' + (peer.peers === 1 ? '' : 's') + ' in ' + (row.category || 'Other') + ', so the global median x' + peer.median.toFixed(2) + ' is used'
       : peer.peers + ' tokened peers in ' + (row.category || 'Other') + ', median mcap/TVL x' + peer.median.toFixed(2);
@@ -664,6 +681,7 @@
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Size curve: ' + fmtFactor(DATA.ols.a) + ' + ' + fmtFactor(DATA.ols.b) + ' x log10(TVL), fitted on ' + DATA.ols.n + ' tokened protocols' }), el('b', { class: 'num', text: fmtUsd(sizeValue) })),
+        el('div', null, el('span', { text: 'Peer pull: 5% toward the category median (' + peerText + ')' }), el('b', { class: 'num', text: fmtUsd(peerValue) + ' → ' + fmtUsd(blendedValue) })),
         el('div', null, el('span', { text: 'Growth ' + growthText + ' → momentum' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.momentum_factor) })),
         el('div', null, el('span', { text: 'Age ' + ageText + ' → maturity' }), el('b', { class: 'num', text: 'x' + fmtFactor(row.maturity_factor) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
@@ -671,8 +689,8 @@
         el('div', null, el('span', { text: 'P10–P90 interval (conformal)' }), el('b', { class: 'num', text: fmtUsd(row.p10_usd) + ' – ' + fmtUsd(row.p90_usd) })),
         el('div', null, el('span', { text: 'Token odds (' + oddsBandLabel(row.age_days) + ')' }), el('b', { class: 'num', text: row.token_odds === null ? 'n/a' : Math.round(row.token_odds * 100) + '%' }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol, and growth and age move the number, not just the verdict: this row\'s momentum x' + fmtFactor(row.momentum_factor) + ' and maturity x' + fmtFactor(row.maturity_factor) + ' are part of the value. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the cross-conformal range, not a confidence trick: the typical tokened protocol lands 3.4x from the model. This is an estimate, not a price. The protocol records no token.' }),
-      el('p', { class: 'sub', text: 'Cross-check, not the value — category peers (' + peerText + '): a flat peer multiple would value this TVL at ' + fmtUsd(peerValue) + '. The curve does not use it: the multiple falls with size, and the comparables model loses both blind tests (leave-one-out 1.613 against the curve\'s 1.223).' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol, and growth, age and the peer pull move the number, not just the verdict: this row\'s momentum x' + fmtFactor(row.momentum_factor) + ', maturity x' + fmtFactor(row.maturity_factor) + ' and 5% peer pull are part of the value. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The interval is the cross-conformal range, not a confidence trick: the typical tokened protocol lands ' + Math.exp(DATA.interval.loo_median_abs).toFixed(1) + 'x from the model. This is an estimate, not a price. The protocol records no token.' }),
+      el('p', { class: 'sub', text: 'Peer pull, 5% of the value — category peers (' + peerText + '): a flat peer multiple would value this TVL at ' + fmtUsd(peerValue) + '. The curve is pulled 5% of the way toward it, to ' + fmtUsd(blendedValue) + ', because that weight passed both blind tests while the full multiple loses both (leave-one-out 1.613 against the curve\'s 1.223).' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
