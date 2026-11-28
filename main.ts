@@ -1,13 +1,14 @@
-// Token Radar's entrypoint: snapshot in, ranked board + dashboard + dossier out.
+// Token Radar's entrypoint, radar-7 (v6): snapshot in, ranked board + dashboard + dossier out.
 //
-// Run it from anywhere; every path it reads is resolved from this file's own directory, never
-// from the working directory. The model lives in lib/model.ts (radar-6): the snapshot's 758
-// protocols are scored by the held-out-selected size curve times the growth and age factors,
-// the board is written to board.json, the dashboard's data is written as dashboard/zz-data.js
-// (one minified line, so it sorts last in the dossier and is the only file the text cap cuts),
-// dashboard/ and screenshots/ are copied through, and dossier.json is written with the
-// vendored make.fun library. The run is deterministic: the same snapshot always writes the
-// same bytes, so the grader's two runs agree.
+// Every path it reads is resolved from this file's own directory, never from the working
+// directory, so it runs the same from anywhere. The model lives in lib/model.ts: the
+// snapshot's 758 protocols are scored by the held-out-selected size curve, pulled 5% toward
+// each protocol's category peer median, times the growth and age factors. The board is written
+// to board.json, the dashboard's data is written as dashboard/zz-data.js (one minified line,
+// so it sorts last in the dossier and is the only file the text cap cuts), dashboard/ and
+// screenshots/ are copied through, and dossier.json is written with the vendored make.fun
+// library. The run is deterministic: the same snapshot always writes the same bytes, so the
+// grader's two runs agree.
 //
 //   node main.ts [--input <snapshot.json|directory>] [--output <dir>]
 //   MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -21,7 +22,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, MODEL_VERSION, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -88,7 +89,7 @@ function main(): void {
   );
 
   process.stdout.write(
-    `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar ${MODEL_VERSION}: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
       `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'dashboard')} (${dashFiles.length} files + zz-data.js), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
   );
 }
