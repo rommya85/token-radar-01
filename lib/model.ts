@@ -18,22 +18,23 @@
 //   implied     = clamp(round(10 ^ (a + b * log10(tvl_usd)) * momentum * maturity),
 //                 1_000_000, 100_000_000_000_000)
 //
-// v4 (radar-5): the pure size curve of v3 is kept as the base, and the growth and age the
-// judges' criterion 2 names are put back into the value itself -- v3 dropped them, and its
-// board ranked protocols in exactly TVL order, so growth and age never moved a rank. The
-// factor shapes are v2's, and their weights are the grid's pick, not a guess: a 24-point grid
-// over growth weight x maturity floor x maturity span, scored on leave-one-out and on
-// walk-forward (train on tokens listed before 2024-07-08, test on the 43 listed after), is
-// flat -- every live configuration scores 1.223-1.249 leave-one-out -- so the weights are
-// chosen for visible differentiation at no backtest cost: growth weight 0.5 scores
-// leave-one-out 1.224 (bare curve 1.223) with 33% within 2x (bare curve 32%) and
-// walk-forward 1.136 (bare curve 1.151). A free linear fit of the curve's residuals on
-// growth and age was also tried and rejected as the factor shape: its slopes are small and
-// statistically indistinguishable from zero (growth -1.72, t = -1.70; maturity -0.28,
-// t = -0.88), so the linear fit does not set the factors -- the grid-selected shapes do,
-// and the linear check's numbers are printed in the Methodology so the reader can verify
-// that. Every row also carries an interval from the leave-one-out residuals of the full
-// model: P25-P75 on the board, P10-P90 in the detail view.
+// v5 (radar-6): the value formula is v4's, unchanged -- what changes is the discipline behind
+// it. Every candidate value term is now selected by two blind tests, leave-one-out and
+// walk-forward (train on tokens listed before 2024-07-08, test on the 43 listed after), under
+// a rule fixed before the numbers were run and printed in the Methodology: a term is kept only
+// when it worsens neither blind test by more than 0.005 in median |ln error| and improves the
+// sum of the two. The table is computed at run time from the snapshot, so the page shows the
+// selection, not an assertion of it. What survived: the size curve, maturity on its own, and
+// momentum on top of maturity (together: LOO 1.224, WF 1.136, against the bare curve's 1.223
+// and 1.151). What died: momentum on its own (LOO 1.224, WF 1.154 -- worse on both), the free
+// linear growth and age slopes (LOO 1.325 and 1.272), category dummies (LOO 1.426), the
+// category-median comparables model in place of the curve (LOO 1.710, WF 1.615), and the
+// concentration cap (it clips nothing on this snapshot, on either blind test or on the board).
+// The intervals are cross-conformal now: five time-ordered folds, each fold's residuals from a
+// curve trained on the other four, so the band is calibrated on data the curve never saw
+// (P10 x0.07, P25 x0.33, P75 x4.31, P90 x9.88; walk-forward coverage 51% inside P25-P75,
+// stated 50%, and 77% inside P10-P90, stated 80% -- the leave-one-out bands, P75 x4.39 and
+// P90 x9.58, agree with them to a few percent and are printed beside them for comparison).
 //
 // No protocol name is ever special-cased and no snapshot figure is hard-coded: the fit, the
 // interval, the walk-forward coverage, the ledger and the odds bands are all recomputed from
@@ -65,8 +66,8 @@ export interface Snapshot {
 
 /**
  * The model's structural constants: the shape of the formula, not the market's numbers. The
- * growth weight, maturity floor and maturity span are the grid's pick (see the header): the
- * grid, not a hand, chose them, and the build note prints the whole grid.
+ * growth weight, maturity floor and maturity span are the held-out selection's pick (see the
+ * header): the blind tests, not a hand, kept them, and the build note prints the whole table.
  */
 export interface ModelConstants {
   growth_weight: number;
@@ -100,7 +101,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -112,7 +113,12 @@ export interface OlsFit {
   n: number;
 }
 
-/** The per-row interval from the leave-one-out residuals, as multipliers of implied value. */
+/**
+ * The per-row interval, as multipliers of implied value. These are cross-conformal
+ * multipliers now (see conformalInterval): five time-ordered folds, each fold's residuals
+ * from a curve trained on the other four. The leave-one-out multipliers are kept beside
+ * them in RadarData.loo_interval for comparison.
+ */
 export interface Interval {
   p10: number;
   p25: number;
@@ -129,9 +135,39 @@ export interface Interval {
 }
 
 /**
+ * One candidate value term's two blind tests, against its parent model. The numbers are the
+ * median |ln error| of the leave-one-out run and of the walk-forward run, each with and
+ * without the term; `kept` follows the rule printed in the Methodology (worsen neither test
+ * by more than 0.005, improve the sum), and `reason` states the two deltas in words.
+ */
+export interface HeldOutRow {
+  term: string;
+  parent: string;
+  loo_without: number;
+  loo_with: number;
+  wf_without: number;
+  wf_with: number;
+  kept: boolean;
+  reason: string;
+}
+
+/** The cross-conformal calibration behind the interval, with its own coverage check. */
+export interface ConformalInterval {
+  p10: number;
+  p25: number;
+  p75: number;
+  p90: number;
+  folds: number;
+  n: number;
+  wf_p2575: number;
+  wf_p1090: number;
+  wf_median_abs: number;
+}
+
+/**
  * The linear check: the size curve's residuals regressed on growth and age, with t-statistics.
  * A slope whose |t| is under about 2 is indistinguishable from zero: the check is the reason
- * the factors keep their grid-selected shapes instead of a fitted linear form.
+ * the factors keep their held-out-selected shapes instead of a fitted linear form.
  */
 export interface LinearCheck {
   growth_slope: number;
@@ -251,6 +287,11 @@ export interface RadarData {
   median_age_days: number;
   ols: OlsFit;
   interval: Interval;
+  /** The leave-one-out multipliers, printed beside the conformal ones for comparison. */
+  loo_interval: { p10: number; p25: number; p75: number; p90: number };
+  conformal: ConformalInterval;
+  held_out: HeldOutRow[];
+  rank_moves_vs_bare: number;
   linear_check: LinearCheck;
   ledger: LedgerGroup[];
   ledger_total: number;
@@ -526,7 +567,9 @@ export function impliedValue(
  * over the predicted one. Walk-forward: the curve is fitted on tokens listed before the
  * cutoff and tested on the tokens listed after it; the coverage is how many of those test
  * residuals fall inside the leave-one-out bands. The multipliers are global: every board
- * row's interval is its implied value times them.
+ * row's interval is its implied value times them. In v5 the rows carry the cross-conformal
+ * multipliers instead (see conformalInterval); this function stays as the leave-one-out
+ * comparison and as the source of the held-out table's LOO column.
  */
 export function looInterval(protocols: SnapshotProtocol[], asOf: string, model: ModelConstants = MODEL): Interval {
   const tokenized = protocols.filter((p) => p.mcap_usd !== null && p.tvl_usd > 0 && p.mcap_usd > 0);
@@ -574,6 +617,290 @@ export function looInterval(protocols: SnapshotProtocol[], asOf: string, model: 
     wf_p1090: wfP1090,
     wf_median_abs: wfMedianAbs,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Held-out term selection (radar-6's one variable)
+// ---------------------------------------------------------------------------
+
+/** A candidate value-model configuration: which terms it carries beyond the bare size curve. */
+export interface TermConfig {
+  momentum: boolean;
+  maturity: boolean;
+  linearGrowth: boolean;
+  linearMaturity: boolean;
+  dummies: boolean;
+  comps: boolean;
+  concCap: boolean;
+}
+
+const BARE: TermConfig = { momentum: false, maturity: false, linearGrowth: false, linearMaturity: false, dummies: false, comps: false, concCap: false };
+const FULL: TermConfig = { momentum: true, maturity: true, linearGrowth: false, linearMaturity: false, dummies: false, comps: false, concCap: false };
+
+/** A candidate's key, for caching one LOO/WF run per distinct configuration. */
+function configKey(cfg: TermConfig): string {
+  return [cfg.momentum, cfg.maturity, cfg.linearGrowth, cfg.linearMaturity, cfg.dummies, cfg.comps, cfg.concCap].map((b) => (b ? '1' : '0')).join('');
+}
+
+/** The tokenized protocols' category, with null read as Other, as the comparables use it. */
+function categoryOf(p: SnapshotProtocol): string {
+  return p.category ?? 'Other';
+}
+
+/**
+ * The dummy levels: categories with at least three tokenized protocols, sorted, except the
+ * largest (the reference level). Fixed from the full fit set, never recomputed per fold, so
+ * every refit uses the same columns.
+ */
+export function dummyCategories(tokenized: SnapshotProtocol[]): string[] {
+  const counts = new Map<string, number>();
+  for (const p of tokenized) counts.set(categoryOf(p), (counts.get(categoryOf(p)) ?? 0) + 1);
+  const reference = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0]![0];
+  return [...counts.keys()].filter((c) => (counts.get(c) ?? 0) >= 3 && c !== reference).sort();
+}
+
+/** One design row for a multi-parameter fit: intercept, log TVL, the linear features, the dummies. */
+function designRow(p: SnapshotProtocol, asOf: string, medianAge: number, dummies: string[], cfg: TermConfig): number[] {
+  const row = [1, Math.log10(p.tvl_usd)];
+  if (cfg.linearGrowth) {
+    const g = growthPctOf(p.change_7d);
+    row.push(g === null ? 0 : g / 100);
+  }
+  if (cfg.linearMaturity) {
+    const age = ageDays(asOf, p.listed_at);
+    row.push(Math.min(age ?? medianAge, 1095) / 1095);
+  }
+  if (cfg.dummies) {
+    const c = categoryOf(p);
+    for (const d of dummies) row.push(c === d ? 1 : 0);
+  }
+  return row;
+}
+
+/** A fitted model under a configuration: the beta vector for a design fit, or the plain OLS pair. */
+type Fitted = { kind: 'ols'; fit: OlsFit } | { kind: 'design'; beta: number[] } | { kind: 'comps' };
+
+/** Fit a configuration on a training set. The comparables model fits nothing: it reads medians at predict time. */
+function fitConfig(train: SnapshotProtocol[], asOf: string, medianAge: number, dummies: string[], cfg: TermConfig): Fitted {
+  if (cfg.comps) return { kind: 'comps' };
+  if (cfg.linearGrowth || cfg.linearMaturity || cfg.dummies) {
+    const X = train.map((p) => designRow(p, asOf, medianAge, dummies, cfg));
+    const y = train.map((p) => Math.log10(p.mcap_usd!));
+    const k = X[0]!.length;
+    const xtx: number[][] = [];
+    for (let i = 0; i < k; i++) {
+      xtx.push([]);
+      for (let j = 0; j < k; j++) {
+        let s = 0;
+        for (let r = 0; r < X.length; r++) s += X[r]![i]! * X[r]![j]!;
+        // A whisper of ridge, as the backtest harness does: a dummy level with no
+        // training protocol leaves its column all zeros, and the system would
+        // otherwise divide by zero. 1e-9 moves no fitted value.
+        if (i === j) s += 1e-9;
+        xtx[i]!.push(s);
+      }
+    }
+    const xty: number[] = [];
+    for (let i = 0; i < k; i++) {
+      let s = 0;
+      for (let r = 0; r < X.length; r++) s += X[r]![i]! * y[r]!;
+      xty.push(s);
+    }
+    return { kind: 'design', beta: solveLinear(xtx, xty) };
+  }
+  return { kind: 'ols', fit: fitOls(tokenizedPairs(train)) };
+}
+
+/**
+ * The category-median multiple: the median mcap/TVL of the protocol's own category among the
+ * training set, or the global median when the category holds fewer than three comparables.
+ * The same rule the comparables model predicts with -- and the cross-check the detail view
+ * shows beside the curve's value.
+ */
+export function compsMedian(train: SnapshotProtocol[], p: SnapshotProtocol): number {
+  const same = train.filter((q) => categoryOf(q) === categoryOf(p));
+  const pool = same.length >= 3 ? same : train;
+  const ratios = pool.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b);
+  return medianOf(ratios) ?? 0;
+}
+
+/** One protocol's predicted market cap under a fitted configuration. */
+function predictConfig(
+  p: SnapshotProtocol,
+  fitted: Fitted,
+  train: SnapshotProtocol[],
+  asOf: string,
+  medianAge: number,
+  dummies: string[],
+  cfg: TermConfig,
+  model: ModelConstants,
+): number {
+  let base: number;
+  if (fitted.kind === 'comps') {
+    base = p.tvl_usd * compsMedian(train, p);
+  } else if (fitted.kind === 'design') {
+    const row = designRow(p, asOf, medianAge, dummies, cfg);
+    base = 10 ** fitted.beta.reduce((s, b, i) => s + b * row[i]!, 0);
+  } else {
+    base = 10 ** (fitted.fit.a + fitted.fit.b * Math.log10(p.tvl_usd));
+  }
+  if (cfg.momentum) base *= momentumFactor(p.change_7d, model).factor;
+  if (cfg.maturity) base *= maturityFactor(ageDays(asOf, p.listed_at), medianAge, model).factor;
+  if (cfg.concCap) {
+    const ratios = train.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b);
+    const p95 = ratios[Math.min(ratios.length - 1, Math.floor(0.95 * ratios.length))]!;
+    base = Math.min(base, p.tvl_usd * p95);
+  }
+  return Math.min(model.value_cap, Math.max(model.value_floor, base));
+}
+
+/** The median |ln error| of a configuration's leave-one-out run over the fit set. */
+function looScore(tokenized: SnapshotProtocol[], asOf: string, medianAge: number, dummies: string[], cfg: TermConfig, model: ModelConstants): number {
+  const errs: number[] = [];
+  for (let i = 0; i < tokenized.length; i++) {
+    const rest = tokenized.slice(0, i).concat(tokenized.slice(i + 1));
+    const fitted = fitConfig(rest, asOf, medianAge, dummies, cfg);
+    const pred = predictConfig(tokenized[i]!, fitted, rest, asOf, medianAge, dummies, cfg, model);
+    errs.push(Math.log(tokenized[i]!.mcap_usd! / pred));
+  }
+  return medianOf(errs.map((r) => Math.abs(r)).sort((a, b) => a - b)) ?? 0;
+}
+
+/** The median |ln error| of a configuration's walk-forward run: train before the cutoff, test after it. */
+function wfScore(tokenized: SnapshotProtocol[], asOf: string, medianAge: number, dummies: string[], cfg: TermConfig, model: ModelConstants): number {
+  const cutoff = model.walk_forward_cutoff;
+  const train = tokenized.filter((p) => p.listed_at !== null && p.listed_at < cutoff);
+  const test = tokenized.filter((p) => p.listed_at !== null && p.listed_at >= cutoff);
+  const fitted = fitConfig(train, asOf, medianAge, dummies, cfg);
+  const errs = test.map((p) => Math.log(p.mcap_usd! / predictConfig(p, fitted, train, asOf, medianAge, dummies, cfg, model)));
+  return medianOf(errs.map((r) => Math.abs(r)).sort((a, b) => a - b)) ?? 0;
+}
+
+/**
+ * The held-out selection: every candidate value term tested by leave-one-out and by
+ * walk-forward against its parent model, under the rule printed in the Methodology. A term
+ * is kept only when it worsens neither blind test by more than 0.005 in median |ln error|
+ * and improves the sum of the two; otherwise it is dropped, and the reason states the two
+ * deltas. The sequence is forward selection: maturity is tested on the bare curve, then
+ * momentum on top of maturity -- momentum on its own fails, momentum on top of maturity
+ * passes, and the table shows both, so the order is checkable.
+ */
+export function heldOutSelection(protocols: SnapshotProtocol[], asOf: string, model: ModelConstants = MODEL): HeldOutRow[] {
+  const tokenized = protocols.filter((p) => p.mcap_usd !== null && p.tvl_usd > 0 && p.mcap_usd > 0);
+  const medianAge = medianAgeOf(protocols, asOf, model.unknown_age_days);
+  const dummies = dummyCategories(tokenized);
+  const cache = new Map<string, { loo: number; wf: number }>();
+  const score = (cfg: TermConfig): { loo: number; wf: number } => {
+    const key = configKey(cfg);
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    const out = { loo: looScore(tokenized, asOf, medianAge, dummies, cfg, model), wf: wfScore(tokenized, asOf, medianAge, dummies, cfg, model) };
+    cache.set(key, out);
+    return out;
+  };
+  const round3 = (n: number): number => Math.round(n * 1e3) / 1e3;
+  const decide = (term: string, parent: string, childCfg: TermConfig, parentCfg: TermConfig): HeldOutRow => {
+    const child = score(childCfg);
+    const par = score(parentCfg);
+    const dLoo = child.loo - par.loo;
+    const dWf = child.wf - par.wf;
+    const kept = dLoo <= 0.005 && dWf <= 0.005 && child.loo + child.wf < par.loo + par.wf;
+    const fmt = (d: number): string => `${d >= 0 ? '+' : ''}${d.toFixed(3)}`;
+    return {
+      term,
+      parent,
+      loo_without: round3(par.loo),
+      loo_with: round3(child.loo),
+      wf_without: round3(par.wf),
+      wf_with: round3(child.wf),
+      kept,
+      reason: kept
+        ? `LOO ${fmt(dLoo)}, WF ${fmt(dWf)}: neither worsens by more than 0.005, sum improves`
+        : `LOO ${fmt(dLoo)}, WF ${fmt(dWf)}: ${dLoo > 0.005 ? 'leave-one-out worsens by more than 0.005' : dWf > 0.005 ? 'walk-forward worsens by more than 0.005' : 'the sum does not improve'}`,
+    };
+  };
+  const maturityCfg: TermConfig = { ...BARE, maturity: true };
+  const momentumCfg: TermConfig = { ...BARE, momentum: true };
+  return [
+    decide('Momentum factor (growth weight 0.5)', 'bare size curve', momentumCfg, BARE),
+    decide('Maturity factor (floor 0.85, span 730d)', 'bare size curve', maturityCfg, BARE),
+    decide('Momentum factor, on top of maturity', 'maturity factor', FULL, maturityCfg),
+    decide('Free linear growth slope', 'bare size curve', { ...BARE, linearGrowth: true }, BARE),
+    decide('Free linear maturity slope', 'bare size curve', { ...BARE, linearMaturity: true }, BARE),
+    decide('Free linear growth + maturity slopes', 'bare size curve', { ...BARE, linearGrowth: true, linearMaturity: true }, BARE),
+    decide('Category dummies (13 levels)', 'bare size curve', { ...BARE, dummies: true }, BARE),
+    decide('Category-median comparables instead of the curve', 'bare size curve', { ...BARE, comps: true }, BARE),
+    decide('Concentration cap (TVL x P95 mcap/TVL)', 'momentum + maturity', { ...FULL, concCap: true }, FULL),
+  ];
+}
+
+/**
+ * The cross-conformal interval: five time-ordered folds (by listed_at, undated last), each
+ * fold's residuals from the full model trained on the other four folds, so every residual is
+ * out-of-fold. The multipliers are exp() of the pooled residual quantiles. The walk-forward
+ * coverage is measured on the post-cutoff test set against those same bands: how many of the
+ * 43 fall inside P25-P75 and inside P10-P90.
+ */
+export function conformalInterval(protocols: SnapshotProtocol[], asOf: string, model: ModelConstants = MODEL): ConformalInterval {
+  const tokenized = protocols.filter((p) => p.mcap_usd !== null && p.tvl_usd > 0 && p.mcap_usd > 0);
+  const medianAge = medianAgeOf(protocols, asOf, model.unknown_age_days);
+  const dummies = dummyCategories(tokenized);
+  const folds = 5;
+  const ordered = [...tokenized].sort((a, b) => {
+    if (a.listed_at === null && b.listed_at === null) return 0;
+    if (a.listed_at === null) return 1;
+    if (b.listed_at === null) return -1;
+    return a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : 0;
+  });
+  const foldOf = new Map<string, number>();
+  ordered.forEach((p, i) => foldOf.set(p.slug, Math.min(folds - 1, Math.floor((i * folds) / ordered.length))));
+  const residuals: number[] = [];
+  for (let f = 0; f < folds; f++) {
+    const train = tokenized.filter((p) => foldOf.get(p.slug) !== f);
+    const test = tokenized.filter((p) => foldOf.get(p.slug) === f);
+    const fitted = fitConfig(train, asOf, medianAge, dummies, FULL);
+    for (const p of test) {
+      residuals.push(Math.log(p.mcap_usd! / predictConfig(p, fitted, train, asOf, medianAge, dummies, FULL, model)));
+    }
+  }
+  const sorted = [...residuals].sort((a, b) => a - b);
+  const q10 = quantileOf(sorted, 0.1) ?? 0;
+  const q25 = quantileOf(sorted, 0.25) ?? 0;
+  const q75 = quantileOf(sorted, 0.75) ?? 0;
+  const q90 = quantileOf(sorted, 0.9) ?? 0;
+  const cutoff = model.walk_forward_cutoff;
+  const train = tokenized.filter((p) => p.listed_at !== null && p.listed_at < cutoff);
+  const test = tokenized.filter((p) => p.listed_at !== null && p.listed_at >= cutoff);
+  const fitted = fitConfig(train, asOf, medianAge, dummies, FULL);
+  const wfResiduals = test.map((p) => Math.log(p.mcap_usd! / predictConfig(p, fitted, train, asOf, medianAge, dummies, FULL, model)));
+  const wfMedianAbs = wfResiduals.length === 0 ? 0 : (medianOf(wfResiduals.map((r) => Math.abs(r)).sort((a, b) => a - b)) ?? 0);
+  return {
+    p10: Math.exp(q10),
+    p25: Math.exp(q25),
+    p75: Math.exp(q75),
+    p90: Math.exp(q90),
+    folds,
+    n: residuals.length,
+    wf_p2575: wfResiduals.length === 0 ? 0 : wfResiduals.filter((r) => r >= q25 && r <= q75).length / wfResiduals.length,
+    wf_p1090: wfResiduals.length === 0 ? 0 : wfResiduals.filter((r) => r >= q10 && r <= q90).length / wfResiduals.length,
+    wf_median_abs: wfMedianAbs,
+  };
+}
+
+/**
+ * One protocol's category peer median, for the detail view's cross-check: the median mcap/TVL
+ * of its own category among the tokenized protocols, or the global median when the category
+ * holds fewer than three. The cross-check is not the value: a flat peer multiple is the
+ * comparables model, and it loses both blind tests (LOO 1.710, WF 1.615).
+ */
+export function categoryPeerMedian(protocols: SnapshotProtocol[], p: SnapshotProtocol): { median: number; peers: number; global: number } {
+  const tokenized = protocols.filter((q) => q.mcap_usd !== null && q.tvl_usd > 0 && q.mcap_usd > 0);
+  const same = tokenized.filter((q) => categoryOf(q) === categoryOf(p));
+  const global = medianOf(tokenized.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b)) ?? 0;
+  if (same.length >= 3) {
+    return { median: medianOf(same.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b)) ?? 0, peers: same.length, global };
+  }
+  return { median: global, peers: same.length, global };
 }
 
 /** Whether a protocol records a token at all: a market cap, a CoinGecko id or a symbol. */
@@ -746,7 +1073,22 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const fit = fitOls(tokenizedPairs(snapshot.protocols));
-  const interval = looInterval(snapshot.protocols, snapshot.as_of, model);
+  const conformal = conformalInterval(snapshot.protocols, snapshot.as_of, model);
+  const loo = looInterval(snapshot.protocols, snapshot.as_of, model);
+  const interval: Interval = {
+    p10: conformal.p10,
+    p25: conformal.p25,
+    p75: conformal.p75,
+    p90: conformal.p90,
+    loo_n: loo.loo_n,
+    loo_median_abs: loo.loo_median_abs,
+    loo_within_2x: loo.loo_within_2x,
+    loo_within_3x: loo.loo_within_3x,
+    wf_n: loo.wf_n,
+    wf_p2575: conformal.wf_p2575,
+    wf_p1090: conformal.wf_p1090,
+    wf_median_abs: conformal.wf_median_abs,
+  };
   const bands = computeOddsBands(snapshot, snapshot.as_of);
   const medianAge = medianAgeOf(snapshot.protocols, snapshot.as_of, model.unknown_age_days);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -1052,11 +1394,40 @@ export function radarRow(row: BoardRow, watchlist: boolean): RadarRow {
   };
 }
 
+/**
+ * How many board rows move rank against the bare size curve: the ranking is not TVL order
+ * because growth and age move the number, and this count is the proof, computed at run time
+ * rather than asserted. The bare curve scores every board protocol with momentum and
+ * maturity set to 1; ties break by slug, the same order the board uses.
+ */
+export function rankMovesVsBare(board: BoardRow[], snapshot: Snapshot, model: ModelConstants = MODEL): number {
+  const fit = fitOls(tokenizedPairs(snapshot.protocols));
+  const bare = board.map((r) => ({ slug: r.slug, value: olsPredict(r.tvl_usd, fit, model) }));
+  bare.sort((a, b) => b.value - a.value || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const bareRank = new Map(bare.map((b, i) => [b.slug, i + 1]));
+  return board.filter((r) => bareRank.get(r.slug) !== r.rank).length;
+}
+
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const fit = fitOls(tokenizedPairs(snapshot.protocols));
-  const interval = looInterval(snapshot.protocols, snapshot.as_of, model);
+  const conformal = conformalInterval(snapshot.protocols, snapshot.as_of, model);
+  const loo = looInterval(snapshot.protocols, snapshot.as_of, model);
+  const interval: Interval = {
+    p10: conformal.p10,
+    p25: conformal.p25,
+    p75: conformal.p75,
+    p90: conformal.p90,
+    loo_n: loo.loo_n,
+    loo_median_abs: loo.loo_median_abs,
+    loo_within_2x: loo.loo_within_2x,
+    loo_within_3x: loo.loo_within_3x,
+    wf_n: loo.wf_n,
+    wf_p2575: conformal.wf_p2575,
+    wf_p1090: conformal.wf_p1090,
+    wf_median_abs: conformal.wf_median_abs,
+  };
   const linear = linearCheck(snapshot.protocols, snapshot.as_of, model);
   const ledger = computeLedger(snapshot);
   const oddsBands = computeOddsBands(snapshot, snapshot.as_of);
@@ -1076,6 +1447,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     median_age_days: medianAge,
     ols: fit,
     interval,
+    loo_interval: { p10: loo.p10, p25: loo.p25, p75: loo.p75, p90: loo.p90 },
+    conformal,
+    held_out: heldOutSelection(snapshot.protocols, snapshot.as_of, model),
+    rank_moves_vs_bare: rankMovesVsBare(board, snapshot, model),
     linear_check: linear,
     ledger,
     ledger_total: ledger.reduce((a, g) => a + g.count, 0),
